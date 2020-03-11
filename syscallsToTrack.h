@@ -1,7 +1,0 @@
-enum syscall_id{
-SYS_EXECVE, 
-SYS_EXIT, 
-SYS_OPEN, 
-SYS_CLOSE, 
-SYS_UNLINK, 
-};
