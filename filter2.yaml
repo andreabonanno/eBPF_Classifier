@@ -2,3 +2,6 @@
 syscalls:
   - execve
   - unlink
+  - exit
+  - open
+  - close
