@@ -3,13 +3,21 @@
 from bcc import BPF
 
 
-syscall_msg_list = ["SYS_EXCVE", "SYS_EXIT", "SYS_UNLINK", "SYS_OPEN", "SYS_CLOSE"]
-syscall_to_track = ["execve", "exit", "unlink", "open", "close"]
-
 ebpf_base_filename = 'ebpf2.c'
+syscallToTrack_filename = 'syscallsToTrack.txt'
+syscallHeader_filename = 'syscallsToTrack.h'
 
 with open(ebpf_base_filename, 'r') as ebpfilebase:
     ebpf_base_str = ebpfilebase.read()
+
+with open(syscallToTrack_filename, 'r') as syscallfile:
+    syscall_to_track = syscallfile.read().splitlines()
+
+with open(syscallHeader_filename, 'w+') as syscallHeaderfile:
+    syscallHeaderfile.write("enum syscall_id{\n")
+    for x in syscall_to_track:
+       syscallHeaderfile.write("SYS_" + x.upper()+", \n")
+    syscallHeaderfile.write("};")
 
 
 bpf = BPF(text=ebpf_base_str)
@@ -30,7 +38,7 @@ def print_event(cpu, data, size):
     if start == 0:
         start = event.ts
     time_s = (float(event.ts - start)) / 1000000000
-    print(b"%-18.9f %-16s %-16d %-10d %-16d %-10s %s" % (time_s, event.comm, event.real_pid, event.ns_pid, event.ns_id, syscall_msg_list[event.call], event.path))
+    print(b"%-18.9f %-16s %-16d %-10d %-16d %-10s %s" % (time_s, event.comm, event.real_pid, event.ns_pid, event.ns_id, event.call, event.path))
 
 
 bpf["events"].open_perf_buffer(print_event)

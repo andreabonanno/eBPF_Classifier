@@ -1,0 +1,5 @@
+execve
+exit
+open
+close
+unlink

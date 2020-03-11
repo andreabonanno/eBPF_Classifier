@@ -1,14 +1,7 @@
 #include <linux/sched.h>
 #include <linux/nsproxy.h>
 #include <linux/pid_namespace.h>
-
-enum syscall_id{
-SYS_EXECVE,
-SYS_EXIT,
-SYS_UNLINK,
-SYS_OPEN,
-SYS_CLOSE,
-};
+#include "syscallsToTrack.h"
 
 typedef struct {
     u32 real_pid;
@@ -112,9 +105,9 @@ int syscall__execve(struct pt_regs *ctx, const char __user *filename) {
 int syscall__exit(struct pt_regs *ctx) {
 
     data_t data = {};
-    data.ns_id = add_pid_ns_if_needed();
-    if(!is_container())
-        return 0;
+    //data.ns_id = add_pid_ns_if_needed();
+    //if(!is_container())
+      //  return 0;
     init_data(&data);
     data.call = SYS_EXIT;
     remove_pid_ns_if_needed();
