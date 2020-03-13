@@ -1,6 +1,7 @@
 #include <linux/sched.h>
 #include <linux/nsproxy.h>
 #include <linux/pid_namespace.h>
+#include <linux/utsname.h>
 
 enum syscall_id{
 SYS_EXECVE,
@@ -15,8 +16,10 @@ typedef struct {
     u32 real_pid;
     u32 ns_pid;
     u32 ns_id;
+    u32 mnt_id;
     u64 ts;
     char comm[TASK_COMM_LEN];
+    char uts_name[TASK_COMM_LEN];
     enum syscall_id call;
     char path[128];
 } data_t;
@@ -32,6 +35,11 @@ static u32 get_task_pid_ns_id(struct task_struct *task)
 static u32 get_task_ns_pid(struct task_struct *task)
 {
     return task->thread_pid->numbers[task->nsproxy->pid_ns_for_children->level].nr;
+}
+
+static char * get_task_uts_name(struct task_struct *task)
+{
+    return task->nsproxy->uts_ns->name.nodename;
 }
 
 static u32 add_pid_ns_if_needed()
@@ -85,6 +93,9 @@ static int is_container()
 static int init_data(data_t *data){
     struct task_struct *task;
     task = (struct task_struct *) bpf_get_current_task();
+    char * uts_name = get_task_uts_name(task);
+    if (uts_name)
+        bpf_probe_read_str(&data->uts_name, TASK_COMM_LEN, uts_name);
     data->ns_pid = get_task_ns_pid(task);
     data->ns_id = get_task_pid_ns_id(task);
     data->real_pid = bpf_get_current_pid_tgid();
