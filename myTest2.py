@@ -11,6 +11,7 @@ ebpf_base_filename = 'ebpf2.c'
 trace_filename = 'tracefile.txt'
 tracefile = None
 mode_trace = False
+mode_listen = False
 
 
 class TraceReader:
@@ -34,11 +35,12 @@ class TraceReader:
         while True:
             container_id = fields[1]
             syscall_id = fields[2]
-            if tmp_dict[container_id] is None:
+            if tmp_dict.get(container_id) is None:
                 tmp_bag = {syscall_id: 1}
                 tmp_dict.update({container_id: tmp_bag})
             else:
                 tmp_bag = tmp_dict[container_id]
+                tmp_bag.setdefault(syscall_id, 0)
                 tmp_bag[syscall_id] += 1
             line = self.tracefile.readline()
             if not line:
@@ -50,6 +52,56 @@ class TraceReader:
                 return tmp_dict
             else:
                 offset = self.tracefile.tell()
+
+    def close(self):
+        self.tracefile.close()
+
+
+def merge_bag(bagA, bagB):
+    return {k: bagA.get(k, 0) + bagB.get(k, 0) for k in set(bagA)}
+
+
+class BagManager:
+
+    def __init__(self, window):
+        self.window_size = window
+        self.chunks_in_window = []
+        self.bag_db = {}
+
+    def process_chunk(self, epoch_chunk):
+        print(epoch_chunk)
+        if epoch_chunk is None:
+            return None
+        if len(self.chunks_in_window) < self.window_size:
+            self.chunks_in_window.append(epoch_chunk)
+        else:
+            self.add_to_dict(self.make_bags_from_window())
+            self.chunks_in_window.pop(0)
+            self.chunks_in_window.append(epoch_chunk)
+
+    def make_bags_from_window(self):
+        bags_tmp = {}
+        for chunk in self.chunks_in_window:
+            chunk_curr = self.chunks_in_window[chunk]
+            for container_id, bag_new in chunk_curr.items():
+                if bags_tmp.get(container_id) is None:
+                    bags_tmp.update({container_id: bag_new})
+                else:
+                    bags_tmp[container_id] = merge_bag(bags_tmp[container_id], bag_new)
+        return bags_tmp
+
+    def add_to_dict(self, bags_new):
+        for container_id, value in bags_new.items():
+            bag_list_curr = self.bag_db.get(container_id)
+            if bag_list_curr is None:
+                bag_list_new = [value]
+                self.bag_db.update({container_id: bag_list_new})
+            else:
+                bag_list_new = bag_list_curr.append(value)
+                self.bag_db.update({container_id: bag_list_new})
+
+    def print_db(self):
+        print(self.bag_db)
 
 
 def print_event(cpu, data, size):
@@ -66,17 +118,9 @@ def print_event(cpu, data, size):
         event.path))
 
 
-def main(argv):
-    global syscall_id_list, bpf, start, ebpf_base_filename, trace_filename, tracefile, mode_trace
-    try:
-        opts, args = getopt.getopt(argv, "t")
-    except getopt.GetoptError:
-        print 'Invalid Arguments'
-        sys.exit(2)
-    for opt, args in opts:
-        if opt == '-t':
-            mode_trace = True
-
+def ebpf_listen():
+    global syscall_id_list, bpf, ebpf_base_filename, trace_filename, tracefile, start
+    
     with open(ebpf_base_filename, 'r') as ebpfilebase:
         ebpf_base_str = ebpfilebase.read()
     bpf = BPF(text=ebpf_base_str)
@@ -96,6 +140,31 @@ def main(argv):
                 bpf.perf_buffer_poll()
             except KeyboardInterrupt:
                 break
+
+
+def main(argv):
+    global trace_filename, tracefile, mode_listen, mode_trace
+    try:
+        opts, args = getopt.getopt(argv, "tl")
+    except getopt.GetoptError:
+        print 'Invalid Arguments'
+        sys.exit(2)
+    for opt, args in opts:
+        if opt == '-t':
+            mode_trace = True
+        elif opt == '-l':
+            mode_listen = True
+
+    if mode_listen:
+        ebpf_listen()
+
+    reader = TraceReader(trace_filename)
+    reader.open()
+    while True:
+        test_string = reader.get_next_epoch_chunk()
+        if test_string is None:
+            break
+        print(test_string)
 
 
 if __name__ == "__main__":
