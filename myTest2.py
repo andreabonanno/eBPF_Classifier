@@ -1,110 +1,83 @@
 #!/usr/bin/python
 
 from bcc import BPF
+from collections import Counter
 import sys
 import getopt
 
 syscall_id_list = "execve", "exit", "open", "close", "mount", "unlink"
 bpf = None
 start = 0
-ebpf_base_filename = 'ebpf2.c'
+ebpf_filename = 'ebpf2.c'
 trace_filename = 'tracefile.txt'
 tracefile = None
+window_size = 10
 mode_trace = False
 mode_listen = False
 
 
-class TraceReader:
+class bagDb:
 
-    def __init__(self, filename):
-        self.offset = 0
-        self.filename = filename
-        self.tracefile = None
-
-    def open(self):
-        self.tracefile = open(self.filename, 'r+')
-
-    def get_next_epoch_chunk(self):
-        tmp_dict = {}
-        line = self.tracefile.readline()
-        offset = self.tracefile.tell()
-        if not line:
-            return None
-        fields = line.split()
-        current_epoch = fields[0]
-        while True:
-            container_id = fields[1]
-            syscall_id = fields[2]
-            if tmp_dict.get(container_id) is None:
-                tmp_bag = {syscall_id: 1}
-                tmp_dict.update({container_id: tmp_bag})
-            else:
-                tmp_bag = tmp_dict[container_id]
-                tmp_bag.setdefault(syscall_id, 0)
-                tmp_bag[syscall_id] += 1
-            line = self.tracefile.readline()
-            if not line:
-                return tmp_dict
-            fields = line.split()
-            next_epoch = fields[0]
-            if next_epoch != current_epoch:
-                self.tracefile.seek(offset)
-                return tmp_dict
-            else:
-                offset = self.tracefile.tell()
-
-    def close(self):
-        self.tracefile.close()
-
-
-def merge_bag(bagA, bagB):
-    return {k: bagA.get(k, 0) + bagB.get(k, 0) for k in set(bagA)}
-
-
-class BagManager:
-
-    def __init__(self, window):
-        self.window_size = window
-        self.chunks_in_window = []
+    def __init__(self, container_id):
+        self.container_id = container_id
+        self.trace_filen = container_id + '.trace'
+        self.trace_offset = 0
+        self.list_filen = container_id + '.list'
+        self.lookup_names = []
+        self.bags_in_window = []
         self.bag_db = {}
 
-    def process_chunk(self, epoch_chunk):
-        print(epoch_chunk)
-        if epoch_chunk is None:
-            return None
-        if len(self.chunks_in_window) < self.window_size:
-            self.chunks_in_window.append(epoch_chunk)
+    def init_lookup_names(self):
+        with open(self.list_filen, 'r+') as list_file:
+            line = list_file.readline()
+            fields = line.split()
+            while not (line is None and len(fields) != 3):
+                new_tup = (fields[0], fields[2])
+                self.lookup_names.append(new_tup)
+
+    def lookup_index(self, num):
+        return [x[0] for x in self.list_filen].index(num)
+
+    def create_db(self):
+        with open(self.trace_filen, 'r+') as trace_file:
+            chunk_curr = self.get_next_chunk(trace_file)
+            while chunk_curr is not None:
+                self.bags_in_window.append(chunk_curr)
+                if len(self.bags_in_window) == window_size:
+                    self.add_bag_to_db(self.create_bag_from_window())
+                    self.bags_in_window.pop(0)
+
+    def create_bag_from_window(self):
+        bag_tmp = len(self.lookup_names) * [0]
+        for elem in self.bags_in_window:
+            bag_tmp = [x + y for x, y in zip(bag_tmp, elem)]
+        return tuple(bag_tmp)
+
+    def add_bag_to_db(self, bag):
+        if self.bag_db.get(bag) is None:
+            self.bag_db.update({bag: 1})
         else:
-            self.add_to_dict(self.make_bags_from_window())
-            self.chunks_in_window.pop(0)
-            self.chunks_in_window.append(epoch_chunk)
+            self.bag_db[bag] += 1
 
-    def make_bags_from_window(self):
-        bags_tmp = {}
-        for chunk in self.chunks_in_window:
-            chunk_curr = self.chunks_in_window[chunk]
-            for container_id, bag_new in chunk_curr.items():
-                if bags_tmp.get(container_id) is None:
-                    bags_tmp.update({container_id: bag_new})
-                else:
-                    bags_tmp[container_id] = merge_bag(bags_tmp[container_id], bag_new)
-        return bags_tmp
-
-    def add_to_dict(self, bags_new):
-        for container_id, value in bags_new.items():
-            bag_list_curr = self.bag_db.get(container_id)
-            if bag_list_curr is None:
-                bag_list_new = [value]
-                self.bag_db.update({container_id: bag_list_new})
+    def get_next_chunk(self, trace_file):
+        line = trace_file.readline()
+        fields = line.split()
+        chunk_tmp = len(self.lookup_names) * [0]
+        while not (line is None and len(fields) != 3):
+            chunk_tmp[self.lookup_index(fields[2])] += 1
+            curr_epoch = fields[0]
+            line = trace_file.readline
+            fields = line.split()
+            next_epoch = fields[0]
+            if next_epoch != curr_epoch:
+                trace_file.seek(self.trace_offset)
+                return chunk_tmp
             else:
-                bag_list_new = bag_list_curr.append(value)
-                self.bag_db.update({container_id: bag_list_new})
-
-    def print_db(self):
-        print(self.bag_db)
+                self.trace_offset = trace_file.tell()
+        return None
 
 
-def print_event(cpu, data, size):
+def on_bpf_event(cpu, data, size):
     global start, tracefile, mode_trace
     event = bpf["events"].event(data)
     if start == 0:
@@ -119,10 +92,10 @@ def print_event(cpu, data, size):
 
 
 def ebpf_listen():
-    global syscall_id_list, bpf, ebpf_base_filename, trace_filename, tracefile, start
-    
-    with open(ebpf_base_filename, 'r') as ebpfilebase:
-        ebpf_base_str = ebpfilebase.read()
+    global syscall_id_list, bpf, ebpf_filename, trace_filename, tracefile, start
+
+    with open(ebpf_filename, 'r') as ebpf_file:
+        ebpf_base_str = ebpf_file.read()
     bpf = BPF(text=ebpf_base_str)
     print("These Syscalls will be tracked:\n")
     for x in syscall_id_list:
@@ -132,7 +105,7 @@ def ebpf_listen():
     print("\n%-18s %-16s %-16s %-16s %-10s %-16s %-10s %s" % (
         "TIME(s)", "UTS_NAME", "COMM", "REAL_PID", "NS_PID", "NS_ID", "SYSCALL", "PATH"))
     start = 0
-    bpf["events"].open_perf_buffer(print_event)
+    bpf["events"].open_perf_buffer(on_bpf_event)
 
     with open(trace_filename, 'w+') as tracefile:
         while True:
@@ -140,6 +113,39 @@ def ebpf_listen():
                 bpf.perf_buffer_poll()
             except KeyboardInterrupt:
                 break
+
+
+def tracefile_process():
+    traces = {}
+    occurrencies = {}
+    with open(trace_filename) as whole_trace:
+        line = whole_trace.readline()
+        fields = line.split()
+        while not (line is None or len(fields) != 3):
+            curr_id = fields[1]
+            curr_syscall = int(fields[2])
+            name_tmp = curr_id + '.trace'
+            if traces.get(curr_id) is None:
+                new_file = open(name_tmp, 'w+')
+                traces.update({curr_id: new_file})
+                zeroed_list = list((x, 0) for x in range(len(syscall_id_list)))
+                occurrencies.update({curr_id: zeroed_list})
+            traces.get(curr_id).writelines(line)
+            old_tuple = occurrencies.get(curr_id)[curr_syscall]
+            occurrencies.get(curr_id)[curr_syscall] = (old_tuple[0], old_tuple[1] + 1)
+
+    for container_id, fd in traces.items():
+        fd.close()
+
+    for container_id, bag in occurrencies.items():
+        name_tmp = container_id + '.list'
+        bag.sort(key=lambda tup: tup[1], reverse=True)
+        with open(name_tmp, 'w+') as new_file:
+            for elem in bag:
+                line = [elem[0], ' ', elem[1], ' ', syscall_id_list[elem[0]], '\n']
+                new_file.writelines(str(x) for x in line)
+
+    return list(traces.keys())
 
 
 def main(argv):
@@ -152,19 +158,16 @@ def main(argv):
     for opt, args in opts:
         if opt == '-t':
             mode_trace = True
-        elif opt == '-l':
+        elif opt == 'l':
             mode_listen = True
 
     if mode_listen:
         ebpf_listen()
-
-    reader = TraceReader(trace_filename)
-    reader.open()
-    while True:
-        test_string = reader.get_next_epoch_chunk()
-        if test_string is None:
-            break
-        print(test_string)
+    discovered_containers = tracefile_process()
+    for i in discovered_containers:
+        db_manager = bagDb(i)
+        db_manager.init_lookup_names()
+        db_manager.create_db()
 
 
 if __name__ == "__main__":
