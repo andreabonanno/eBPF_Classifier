@@ -1,7 +1,6 @@
 #!/usr/bin/python
 
 from bcc import BPF
-from collections import Counter
 import sys
 import getopt
 
@@ -31,12 +30,14 @@ class bagDb:
         with open(self.list_filen, 'r+') as list_file:
             line = list_file.readline()
             fields = line.split()
-            while not (line is None and len(fields) != 3):
+            while line and len(fields) == 3:
                 new_tup = (fields[0], fields[2])
                 self.lookup_names.append(new_tup)
+                line = list_file.readline()
+                fields = line.split()
 
     def lookup_index(self, num):
-        return [x[0] for x in self.list_filen].index(num)
+        return [x[0] for x in self.lookup_names].index(num)
 
     def create_db(self):
         with open(self.trace_filen, 'r+') as trace_file:
@@ -46,6 +47,7 @@ class bagDb:
                 if len(self.bags_in_window) == window_size:
                     self.add_bag_to_db(self.create_bag_from_window())
                     self.bags_in_window.pop(0)
+                chunk_curr = self.get_next_chunk(trace_file)
 
     def create_bag_from_window(self):
         bag_tmp = len(self.lookup_names) * [0]
@@ -63,17 +65,20 @@ class bagDb:
         line = trace_file.readline()
         fields = line.split()
         chunk_tmp = len(self.lookup_names) * [0]
-        while not (line is None and len(fields) != 3):
+        while line and len(fields) == 3:
             chunk_tmp[self.lookup_index(fields[2])] += 1
             curr_epoch = fields[0]
-            line = trace_file.readline
-            fields = line.split()
-            next_epoch = fields[0]
-            if next_epoch != curr_epoch:
-                trace_file.seek(self.trace_offset)
+            line = trace_file.readline()
+            if not (line and len(fields) == 3):
                 return chunk_tmp
             else:
-                self.trace_offset = trace_file.tell()
+                fields = line.split()
+                next_epoch = fields[0]
+                if next_epoch != curr_epoch:
+                    trace_file.seek(self.trace_offset)
+                    return chunk_tmp
+                else:
+                    self.trace_offset = trace_file.tell()
         return None
 
 
@@ -121,7 +126,7 @@ def tracefile_process():
     with open(trace_filename) as whole_trace:
         line = whole_trace.readline()
         fields = line.split()
-        while not (line is None or len(fields) != 3):
+        while line and len(fields) == 3:
             curr_id = fields[1]
             curr_syscall = int(fields[2])
             name_tmp = curr_id + '.trace'
@@ -133,6 +138,8 @@ def tracefile_process():
             traces.get(curr_id).writelines(line)
             old_tuple = occurrencies.get(curr_id)[curr_syscall]
             occurrencies.get(curr_id)[curr_syscall] = (old_tuple[0], old_tuple[1] + 1)
+            line = whole_trace.readline()
+            fields = line.split()
 
     for container_id, fd in traces.items():
         fd.close()
@@ -144,7 +151,6 @@ def tracefile_process():
             for elem in bag:
                 line = [elem[0], ' ', elem[1], ' ', syscall_id_list[elem[0]], '\n']
                 new_file.writelines(str(x) for x in line)
-
     return list(traces.keys())
 
 
@@ -158,16 +164,22 @@ def main(argv):
     for opt, args in opts:
         if opt == '-t':
             mode_trace = True
-        elif opt == 'l':
+        elif opt == '-l':
             mode_listen = True
-
     if mode_listen:
         ebpf_listen()
-    discovered_containers = tracefile_process()
-    for i in discovered_containers:
-        db_manager = bagDb(i)
-        db_manager.init_lookup_names()
-        db_manager.create_db()
+    container_discovered = tracefile_process()
+    if len(container_discovered) == 0:
+        print("No container has been discovered")
+    else:
+        print("\n%d containers has been discovered, with id:\n" % (len(container_discovered)))
+        print(container_discovered)
+    for container_id in container_discovered:
+        db = bagDb(container_id)
+        db.init_lookup_names()
+        db.create_db()
+        print("A System call bag for %s has been classified:\n" % container_id)
+        print(db.bag_db)
 
 
 if __name__ == "__main__":
