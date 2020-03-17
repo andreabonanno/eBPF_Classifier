@@ -12,7 +12,7 @@ trace_filename = 'tracefile.txt'
 tracefile = None
 window_size = 10
 mode_trace = False
-mode_listen = False
+mode_classify = False
 
 
 class bagDb:
@@ -155,31 +155,31 @@ def tracefile_process():
 
 
 def main(argv):
-    global trace_filename, tracefile, mode_listen, mode_trace
+    global trace_filename, tracefile, mode_classify, mode_trace
     try:
-        opts, args = getopt.getopt(argv, "tl")
+        opts, args = getopt.getopt(argv, "tc")
     except getopt.GetoptError:
         print 'Invalid Arguments'
         sys.exit(2)
     for opt, args in opts:
         if opt == '-t':
             mode_trace = True
-        elif opt == '-l':
-            mode_listen = True
-    if mode_listen:
-        ebpf_listen()
+        elif opt == '-c':
+            mode_classify = True
+    ebpf_listen()
     container_discovered = tracefile_process()
     if len(container_discovered) == 0:
         print("No container has been discovered")
     else:
         print("\n%d containers has been discovered, with id:\n" % (len(container_discovered)))
         print(container_discovered)
-    for container_id in container_discovered:
-        db = bagDb(container_id)
-        db.init_lookup_names()
-        db.create_db()
-        print("A System call bag for %s has been classified:\n" % container_id)
-        print(db.bag_db)
+    if mode_classify:
+        for container_id in container_discovered:
+            db = bagDb(container_id)
+            db.init_lookup_names()
+            db.create_db()
+            print("A System call bag for %s has been classified:\n" % container_id)
+            print(db.bag_db)
 
 
 if __name__ == "__main__":
