@@ -1,21 +1,39 @@
 #!/usr/bin/python
 
 from bcc import BPF
-import sys
-import getopt
+from optparse import OptionParser
+import ctypes
 
-syscall_id_list = "execve", "exit", "open", "close", "mount", "unlink"
+syscall_id_list = ["execve", "execveat", "exit", "mmap", "mprotect", "clone", "fork", "vfork", "newstat",
+                   "newfstat", "newlstat", "mknod", "mknodat", "dup", "dup2", "dup3",
+                   "memfd_create", "socket", "close", "ioctl", "access", "faccessat", "kill", "listen",
+                   "connect", "accept", "accept4", "bind", "getsockname", "prctl", "ptrace",
+                   "process_vm_writev", "process_vm_readv", "init_module", "finit_module", "delete_module",
+                   "symlink", "symlinkat", "getdents", "getdents64", "creat", "open", "openat",
+                   "mount", "umount", "unlink", "unlinkat", "setuid", "setgid", "setreuid", "setregid",
+                   "setresuid", "setresgid", "setfsuid", "setfsgid"]
+
+syscall_id_ret_list = ["clone", "fork", "vfork"]
+
+cli_options = {}
 bpf = None
-start = 0
+time_start = 0
 ebpf_filename = 'ebpf2.c'
 trace_filename = 'tracefile.txt'
 tracefile = None
 window_size = 10
-mode_trace = False
-mode_classify = False
 
 
-class bagDb:
+class SharedConfig(object):
+    CONFIG_TASK_MODE = 0
+    CONFIG_CONTAINER_MODE = 1
+
+
+class SharedTaskname(ctypes.Structure):
+    _fields_ = [("name", ctypes.c_char * 16)]
+
+
+class BagDb:
 
     def __init__(self, container_id):
         self.container_id = container_id
@@ -27,17 +45,24 @@ class bagDb:
         self.bag_db = {}
 
     def init_lookup_names(self):
+        tmp_list = []
         with open(self.list_filen, 'r+') as list_file:
             line = list_file.readline()
             fields = line.split()
             while line and len(fields) == 3:
-                new_tup = (fields[0], fields[2])
-                self.lookup_names.append(new_tup)
+                new_tup = (fields[0], fields[1], fields[2])
+                tmp_list.append(new_tup)
                 line = list_file.readline()
                 fields = line.split()
+        call_types = len(tmp_list)
+        self.lookup_names = [(int(x[0]), x[2]) for x in tmp_list if int(x[1]) > call_types]
+        self.lookup_names.append((-1, "others"))
 
     def lookup_index(self, num):
-        return [x[0] for x in self.lookup_names].index(num)
+        try:
+            return [x[0] for x in self.lookup_names].index(num)
+        except ValueError:
+            return -1
 
     def create_db(self):
         with open(self.trace_filen, 'r+') as trace_file:
@@ -66,7 +91,7 @@ class bagDb:
         fields = line.split()
         chunk_tmp = len(self.lookup_names) * [0]
         while line and len(fields) == 3:
-            chunk_tmp[self.lookup_index(fields[2])] += 1
+            chunk_tmp[self.lookup_index(int(fields[2]))] += 1
             curr_epoch = fields[0]
             line = trace_file.readline()
             if not (line and len(fields) == 3):
@@ -83,41 +108,78 @@ class bagDb:
 
 
 def on_bpf_event(cpu, data, size):
-    global start, tracefile, mode_trace
+    global time_start
     event = bpf["events"].event(data)
-    if start == 0:
-        start = event.ts
-    time_s = (float(event.ts - start)) / 1000000000
-    if mode_trace:
-        epoch = int(time_s)
-        tracefile.write("%d %s %d\n" % (epoch, event.uts_name, event.call))
+    if time_start == 0:
+        time_start = event.ts
+    time_s = (float(event.ts - time_start)) / 1000000000
+    epoch = int(time_s)
     print(b"%-18.9f %-16s %-16s %-16d %-10d %-16d %-10s %s" % (
         time_s, event.uts_name, event.comm, event.real_pid, event.ns_pid, event.ns_id, syscall_id_list[event.call],
         event.path))
 
 
 def ebpf_listen():
-    global syscall_id_list, bpf, ebpf_filename, trace_filename, tracefile, start
+    global cli_options, syscall_id_list, syscall_id_ret_list, bpf, ebpf_filename
 
     with open(ebpf_filename, 'r') as ebpf_file:
         ebpf_base_str = ebpf_file.read()
+
     bpf = BPF(text=ebpf_base_str)
-    print("These Syscalls will be tracked:\n")
+
+    # Passing config values to the eBPF program through already initialized maps
+
+    map_index = 0
+    if cli_options.task_id:
+        key = ctypes.c_uint32(SharedConfig.CONFIG_TASK_MODE)
+        bpf["config_map"][key] = ctypes.c_uint32(True)
+        strct = SharedTaskname()
+        strct.name = cli_options.task_id
+        key = ctypes.c_uint32(map_index)
+        bpf["taskname_buf"][key] = strct
+    elif cli_options.container_id:
+        key = ctypes.c_uint32(SharedConfig.CONFIG_CONTAINER_MODE)
+        bpf["config_map"][key] = ctypes.c_uint32(True)
+        strct = SharedTaskname()
+        strct.name = cli_options.container_id
+        key = ctypes.c_uint32(map_index)
+        bpf["taskname_buf"][key] = strct
+    else:
+        key = ctypes.c_uint32(SharedConfig.CONFIG_TASK_MODE)
+        bpf["config_map"][key] = ctypes.c_uint32(False)
+        key = ctypes.c_uint32(SharedConfig.CONFIG_CONTAINER_MODE)
+        bpf["config_map"][key] = ctypes.c_uint32(False)
+
+    if cli_options.mode_verbose:
+        print("%d syscalls will be tracked:" % (len(syscall_id_list)))
+
+    # Attaching kprobes for syscalls.
+    # execve, execveat and exit are mandatory for tracking the containers
+
     for x in syscall_id_list:
         syscall_fname = bpf.get_syscall_fnname(x)
-        print(syscall_fname)
+        if cli_options.mode_verbose:
+            print(syscall_fname)
         bpf.attach_kprobe(syscall_fname, fn_name="syscall__" + x)
+
+    # Attaching kretprobes for syscalls
+    # fork, vfork and clone are mandatory for tracking child processes
+
+    if cli_options.task_id:
+        for x in syscall_id_ret_list:
+            syscall_fname = bpf.get_syscall_fnname(x)
+            bpf.attach_kretprobe(event=syscall_fname, fn_name="trace_ret_" + x)
+
     print("\n%-18s %-16s %-16s %-16s %-10s %-16s %-10s %s" % (
         "TIME(s)", "UTS_NAME", "COMM", "REAL_PID", "NS_PID", "NS_ID", "SYSCALL", "PATH"))
-    start = 0
+
     bpf["events"].open_perf_buffer(on_bpf_event)
 
-    with open(trace_filename, 'w+') as tracefile:
-        while True:
-            try:
-                bpf.perf_buffer_poll()
-            except KeyboardInterrupt:
-                break
+    while True:
+        try:
+            bpf.perf_buffer_poll()
+        except KeyboardInterrupt:
+            break
 
 
 def tracefile_process():
@@ -154,33 +216,27 @@ def tracefile_process():
     return list(traces.keys())
 
 
-def main(argv):
-    global trace_filename, tracefile, mode_classify, mode_trace
-    try:
-        opts, args = getopt.getopt(argv, "tc")
-    except getopt.GetoptError:
-        print 'Invalid Arguments'
-        sys.exit(2)
-    for opt, args in opts:
-        if opt == '-t':
-            mode_trace = True
-        elif opt == '-c':
-            mode_classify = True
+def main():
+    global cli_options
+
+    # Dealing with CLI options
+
+    OptParser = OptionParser()
+    OptParser.add_option("-l", "--learn", action="store_true", dest="mode_learn", default=False,
+                         help="Creates databses of normal behaviour for the items the program listened to")
+    OptParser.add_option("-t", "--task", action="store", type="string", dest="task_id", default=None,
+                         help="Start the program in task mode. Needs the taskname to track as argument.")
+    OptParser.add_option("-c", "--container", action="store", type="string", dest="container_id", default=None,
+                         help="Start the program in container mode. Needs the container id to track as argument.")
+    OptParser.add_option("-v", "--verbose", action="store_true", dest="mode_verbose", default=False,
+                         help="Start the program in verbose mode, printing more info")
+    (cli_options, args) = OptParser.parse_args()
+
+    if cli_options.task_id and cli_options.container_id:
+        OptParser.error("options -t and -c are mutually exclusive")
+
     ebpf_listen()
-    container_discovered = tracefile_process()
-    if len(container_discovered) == 0:
-        print("No container has been discovered")
-    else:
-        print("\n%d containers has been discovered, with id:\n" % (len(container_discovered)))
-        print(container_discovered)
-    if mode_classify:
-        for container_id in container_discovered:
-            db = bagDb(container_id)
-            db.init_lookup_names()
-            db.create_db()
-            print("A System call bag for %s has been classified:\n" % container_id)
-            print(db.bag_db)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()
