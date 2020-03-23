@@ -4,7 +4,7 @@ from bcc import BPF
 from optparse import OptionParser
 import ctypes
 
-syscall_id_list = ["execve", "execveat", "exit", "mmap", "mprotect", "clone", "fork", "vfork", "newstat",
+syscall_id_list = ["exit", "execve", "execveat", "mmap", "mprotect", "clone", "fork", "vfork", "newstat",
                    "newfstat", "newlstat", "mknod", "mknodat", "dup", "dup2", "dup3",
                    "memfd_create", "socket", "close", "ioctl", "access", "faccessat", "kill", "listen",
                    "connect", "accept", "accept4", "bind", "getsockname", "prctl", "ptrace",
@@ -19,8 +19,7 @@ cli_options = {}
 bpf = None
 time_start = 0
 ebpf_filename = 'ebpf2.c'
-trace_filename = 'tracefile.txt'
-tracefile = None
+bag_dbs = {}
 window_size = 10
 
 
@@ -33,82 +32,64 @@ class SharedTaskname(ctypes.Structure):
     _fields_ = [("name", ctypes.c_char * 16)]
 
 
-class BagDb:
+class BagManager:
 
-    def __init__(self, container_id):
-        self.container_id = container_id
-        self.trace_filen = container_id + '.trace'
-        self.trace_offset = 0
-        self.list_filen = container_id + '.list'
-        self.lookup_names = []
-        self.bags_in_window = []
-        self.bag_db = {}
+    def __init__(self, name, wsize):
+        self.id = name
+        self.filename = name + '.bagdb'
+        self.snapshot_curr = None
+        self.window_size = wsize
+        self.chunks_in_window = []
+        self.trace = []
+        self.freq = [0] * len(syscall_id_list)
+        self.names_lookup = []
+
+    def add_event(self, epoch, call):
+        if epoch not in [x[0] for x in self.trace]:
+            new_epoch = [0] * len(syscall_id_list)
+            self.trace.append([epoch, new_epoch])
+        self.trace[-1][1][call] += 1
+        self.freq[call] += 1
 
     def init_lookup_names(self):
-        tmp_list = []
-        with open(self.list_filen, 'r+') as list_file:
-            line = list_file.readline()
-            fields = line.split()
-            while line and len(fields) == 3:
-                new_tup = (fields[0], fields[1], fields[2])
-                tmp_list.append(new_tup)
-                line = list_file.readline()
-                fields = line.split()
-        call_types = len(tmp_list)
-        self.lookup_names = [(int(x[0]), x[2]) for x in tmp_list if int(x[1]) > call_types]
-        self.lookup_names.append((-1, "others"))
+        syscall_dinstinct = sum(x > 0 for x in self.freq)
+        for idx, x in enumerate(self.freq):
+            if x > syscall_dinstinct:
+                self.names_lookup.append(idx)
 
-    def lookup_index(self, num):
+    def lookup_name(self, num):
         try:
-            return [x[0] for x in self.lookup_names].index(num)
+            return self.names_lookup.index(num)
         except ValueError:
-            return -1
-
-    def create_db(self):
-        with open(self.trace_filen, 'r+') as trace_file:
-            chunk_curr = self.get_next_chunk(trace_file)
-            while chunk_curr is not None:
-                self.bags_in_window.append(chunk_curr)
-                if len(self.bags_in_window) == window_size:
-                    self.add_bag_to_db(self.create_bag_from_window())
-                    self.bags_in_window.pop(0)
-                chunk_curr = self.get_next_chunk(trace_file)
+            return None
 
     def create_bag_from_window(self):
-        bag_tmp = len(self.lookup_names) * [0]
-        for elem in self.bags_in_window:
-            bag_tmp = [x + y for x, y in zip(bag_tmp, elem)]
-        return tuple(bag_tmp)
-
-    def add_bag_to_db(self, bag):
-        if self.bag_db.get(bag) is None:
-            self.bag_db.update({bag: 1})
-        else:
-            self.bag_db[bag] += 1
-
-    def get_next_chunk(self, trace_file):
-        line = trace_file.readline()
-        fields = line.split()
-        chunk_tmp = len(self.lookup_names) * [0]
-        while line and len(fields) == 3:
-            chunk_tmp[self.lookup_index(int(fields[2]))] += 1
-            curr_epoch = fields[0]
-            line = trace_file.readline()
-            if not (line and len(fields) == 3):
-                return chunk_tmp
+        tmp_bag = [0] * len(syscall_id_list)
+        tmp_res = [0] * len(self.names_lookup)
+        for chunk in self.chunks_in_window:
+            tmp_bag = [sum(x) for x in zip(tmp_bag, chunk)]
+        count_others = 0
+        for idx, x in enumerate(tmp_bag):
+            res_lookup = self.lookup_name(idx)
+            if res_lookup is None:
+                count_others += x
             else:
-                fields = line.split()
-                next_epoch = fields[0]
-                if next_epoch != curr_epoch:
-                    trace_file.seek(self.trace_offset)
-                    return chunk_tmp
-                else:
-                    self.trace_offset = trace_file.tell()
-        return None
+                tmp_res[res_lookup] += x
+        tmp_res.append(count_others)
+        self.snapshot_curr = tuple(tmp_res)
+
+    def process_trace(self):
+        window_space = self.window_size
+        while len(self.trace) > 0:
+            if window_space > 0:
+                self.chunks_in_window.append(self.trace.pop(0)[1])
+            self.create_bag_from_window()
+            self.chunks_in_window.pop(0)
+            self.chunks_in_window.append(self.trace.pop(0)[1])
 
 
 def on_bpf_event(cpu, data, size):
-    global time_start
+    global time_start, cli_options, bag_dbs, window_size
     event = bpf["events"].event(data)
     if time_start == 0:
         time_start = event.ts
@@ -117,6 +98,16 @@ def on_bpf_event(cpu, data, size):
     print(b"%-18.9f %-16s %-16s %-16d %-10d %-16d %-10s %s" % (
         time_s, event.uts_name, event.comm, event.real_pid, event.ns_pid, event.ns_id, syscall_id_list[event.call],
         event.path))
+    if cli_options.mode_learn:
+        db_name = event.uts_name
+        if cli_options.task_id:
+            db_name = cli_options.task_id
+        elif cli_options.container_id:
+            db_name = cli_options.container_id
+        if db_name not in bag_dbs:
+            new_db = BagManager(db_name, window_size)
+            bag_dbs.update({db_name: new_db})
+        bag_dbs[db_name].addEvent(epoch, event.call)
 
 
 def ebpf_listen():
@@ -131,6 +122,7 @@ def ebpf_listen():
 
     map_index = 0
     if cli_options.task_id:
+        print("Tracking process named \"%s\"" % cli_options.task_id)
         key = ctypes.c_uint32(SharedConfig.CONFIG_TASK_MODE)
         bpf["config_map"][key] = ctypes.c_uint32(True)
         strct = SharedTaskname()
@@ -138,6 +130,7 @@ def ebpf_listen():
         key = ctypes.c_uint32(map_index)
         bpf["taskname_buf"][key] = strct
     elif cli_options.container_id:
+        print("Tracking container with id %s" % cli_options.container_id)
         key = ctypes.c_uint32(SharedConfig.CONFIG_CONTAINER_MODE)
         bpf["config_map"][key] = ctypes.c_uint32(True)
         strct = SharedTaskname()
@@ -153,13 +146,12 @@ def ebpf_listen():
     if cli_options.mode_verbose:
         print("%d syscalls will be tracked:" % (len(syscall_id_list)))
 
-    # Attaching kprobes for syscalls.
-    # execve, execveat and exit are mandatory for tracking the containers
+    # Attaching kprobes for syscalls and events.
+    # execve, execveat and do_exit are mandatory for tracking the containers
 
-    for x in syscall_id_list:
+    bpf.attach_kprobe(event="do_exit", fn_name="trace_do_exit")
+    for x in syscall_id_list[1:]:
         syscall_fname = bpf.get_syscall_fnname(x)
-        if cli_options.mode_verbose:
-            print(syscall_fname)
         bpf.attach_kprobe(syscall_fname, fn_name="syscall__" + x)
 
     # Attaching kretprobes for syscalls
@@ -182,40 +174,6 @@ def ebpf_listen():
             break
 
 
-def tracefile_process():
-    traces = {}
-    occurrencies = {}
-    with open(trace_filename) as whole_trace:
-        line = whole_trace.readline()
-        fields = line.split()
-        while line and len(fields) == 3:
-            curr_id = fields[1]
-            curr_syscall = int(fields[2])
-            name_tmp = curr_id + '.trace'
-            if traces.get(curr_id) is None:
-                new_file = open(name_tmp, 'w+')
-                traces.update({curr_id: new_file})
-                zeroed_list = list((x, 0) for x in range(len(syscall_id_list)))
-                occurrencies.update({curr_id: zeroed_list})
-            traces.get(curr_id).writelines(line)
-            old_tuple = occurrencies.get(curr_id)[curr_syscall]
-            occurrencies.get(curr_id)[curr_syscall] = (old_tuple[0], old_tuple[1] + 1)
-            line = whole_trace.readline()
-            fields = line.split()
-
-    for container_id, fd in traces.items():
-        fd.close()
-
-    for container_id, bag in occurrencies.items():
-        name_tmp = container_id + '.list'
-        bag.sort(key=lambda tup: tup[1], reverse=True)
-        with open(name_tmp, 'w+') as new_file:
-            for elem in bag:
-                line = [elem[0], ' ', elem[1], ' ', syscall_id_list[elem[0]], '\n']
-                new_file.writelines(str(x) for x in line)
-    return list(traces.keys())
-
-
 def main():
     global cli_options
 
@@ -236,6 +194,11 @@ def main():
         OptParser.error("options -t and -c are mutually exclusive")
 
     ebpf_listen()
+    if cli_options.mode_learn:
+        for db in bag_dbs:
+            db.init_lookup_names()
+            db.process_trace()
+            print(db.snapshot_curr)
 
 
 if __name__ == "__main__":
