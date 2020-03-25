@@ -42,6 +42,8 @@ Stop learning with SIGINT Ctrl-C
 </pre>
 Monitor:
 <pre>sudo python Classifier_test.py -c 6b17fbeeefef -mv</pre>
+Then start the container:
+<pre>sudo docker start 6b17fbeeefef</pre>
 Stop monitoring with SIGINT Ctrl-C:
 <pre>MISMATCH 6
 
