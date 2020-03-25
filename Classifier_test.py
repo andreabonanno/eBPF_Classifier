@@ -257,7 +257,7 @@ def main():
     if cli_options.mode_monitor:
         db = bag_dbs[cli_arg_name]
         db.process_trace(mode="monitor")
-        print("MISMATCH %d\n" % db.mismatch_count)
+        print("\nMISMATCH %d\n" % db.mismatch_count)
         print(db.db_to_str(target="normal"))
         print(db.db_to_str(target="monitor"))
 
