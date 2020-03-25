@@ -1,186 +1,279 @@
 #!/usr/bin/python
 
 from bcc import BPF
-import sys
-import getopt
+from optparse import OptionParser
+import ctypes
+import json
 
-syscall_id_list = "execve", "exit", "open", "close", "mount", "unlink"
+# This list must match the one in the eBpf program
+syscall_id_list = ["exit", "execve", "execveat", "mmap", "mprotect", "clone", "fork", "vfork", "newstat",
+                   "newfstat", "newlstat", "mknod", "mknodat", "dup", "dup2", "dup3",
+                   "memfd_create", "socket", "close", "ioctl", "access", "faccessat", "kill", "listen",
+                   "connect", "accept", "accept4", "bind", "getsockname", "prctl", "ptrace",
+                   "process_vm_writev", "process_vm_readv", "init_module", "finit_module", "delete_module",
+                   "symlink", "symlinkat", "getdents", "getdents64", "creat", "open", "openat",
+                   "mount", "umount", "unlink", "unlinkat", "setuid", "setgid", "setreuid", "setregid",
+                   "setresuid", "setresgid", "setfsuid", "setfsgid"]
+
+# Kretprobes neeeded to track child processes
+syscall_id_ret_list = ["clone", "fork", "vfork"]
+
+cli_options = {}
+cli_arg_name = None
 bpf = None
-start = 0
+time_start = 0
 ebpf_filename = 'ebpf2.c'
-trace_filename = 'tracefile.txt'
-tracefile = None
+bag_dbs = {}
 window_size = 10
-mode_trace = False
-mode_classify = False
 
 
-class bagDb:
+# Indexes of the eBpf map used to pass config to the eBpf program
+class SharedConfig(object):
+    CONFIG_TASK_MODE = 0
+    CONFIG_CONTAINER_MODE = 1
 
-    def __init__(self, container_id):
-        self.container_id = container_id
-        self.trace_filen = container_id + '.trace'
-        self.trace_offset = 0
-        self.list_filen = container_id + '.list'
-        self.lookup_names = []
-        self.bags_in_window = []
-        self.bag_db = {}
 
+# This struct must match the one defined in the eBpf file
+class SharedTaskname(ctypes.Structure):
+    _fields_ = [("name", ctypes.c_char * 16)]
+
+
+class BagManager:
+
+    def __init__(self, name, wsize):
+        self.id = name
+        self.db_normal = {}
+        self.db_monitor = {}
+        self.mismatch_count = 0
+        self.window_size = wsize
+        self.chunks_in_window = []
+        self.trace = []
+        self.freq = [0] * len(syscall_id_list)
+        self.names_lookup = []
+
+    # Events are grouped per epoch
+    def add_event(self, epoch, call):
+        if epoch not in [x[0] for x in self.trace]:
+            new_epoch = [0] * len(syscall_id_list)
+            self.trace.append([epoch, new_epoch])
+        self.trace[-1][1][call] += 1
+        self.freq[call] += 1
+
+    # Keeps correspondece for the global syscall ids and the BagManager specific ids
+    # Sysycalls with low occurence are marked as "other"
     def init_lookup_names(self):
-        with open(self.list_filen, 'r+') as list_file:
-            line = list_file.readline()
-            fields = line.split()
-            while line and len(fields) == 3:
-                new_tup = (fields[0], fields[2])
-                self.lookup_names.append(new_tup)
-                line = list_file.readline()
-                fields = line.split()
+        syscall_dinstinct = sum(x > 0 for x in self.freq)
+        for idx, x in enumerate(self.freq):
+            if x > syscall_dinstinct:
+                self.names_lookup.append(idx)
 
-    def lookup_index(self, num):
-        return [x[0] for x in self.lookup_names].index(num)
+    def lookup_name(self, num):
+        try:
+            return self.names_lookup.index(num)
+        except ValueError:
+            return None
 
-    def create_db(self):
-        with open(self.trace_filen, 'r+') as trace_file:
-            chunk_curr = self.get_next_chunk(trace_file)
-            while chunk_curr is not None:
-                self.bags_in_window.append(chunk_curr)
-                if len(self.bags_in_window) == window_size:
-                    self.add_bag_to_db(self.create_bag_from_window())
-                    self.bags_in_window.pop(0)
-                chunk_curr = self.get_next_chunk(trace_file)
+    # Creates a syscall bag from the current sliding window
+    def create_bag_from_window(self, mode):
+        target_db = None
+        if mode == "learn":
+            target_db = self.db_normal
+        elif mode == "monitor":
+            target_db = self.db_monitor
 
-    def create_bag_from_window(self):
-        bag_tmp = len(self.lookup_names) * [0]
-        for elem in self.bags_in_window:
-            bag_tmp = [x + y for x, y in zip(bag_tmp, elem)]
-        return tuple(bag_tmp)
-
-    def add_bag_to_db(self, bag):
-        if self.bag_db.get(bag) is None:
-            self.bag_db.update({bag: 1})
-        else:
-            self.bag_db[bag] += 1
-
-    def get_next_chunk(self, trace_file):
-        line = trace_file.readline()
-        fields = line.split()
-        chunk_tmp = len(self.lookup_names) * [0]
-        while line and len(fields) == 3:
-            chunk_tmp[self.lookup_index(fields[2])] += 1
-            curr_epoch = fields[0]
-            line = trace_file.readline()
-            if not (line and len(fields) == 3):
-                return chunk_tmp
+        tmp_chunk = [0] * len(syscall_id_list)
+        tmp_res = [0] * len(self.names_lookup)
+        for chunk in self.chunks_in_window:
+            tmp_chunk = [x + y for x, y in zip(tmp_chunk, chunk)]
+        count_others = 0
+        for idx, x in enumerate(tmp_chunk):
+            res_lookup = self.lookup_name(idx)
+            if res_lookup is None:
+                count_others += x
             else:
-                fields = line.split()
-                next_epoch = fields[0]
-                if next_epoch != curr_epoch:
-                    trace_file.seek(self.trace_offset)
-                    return chunk_tmp
-                else:
-                    self.trace_offset = trace_file.tell()
-        return None
+                tmp_res[res_lookup] += x
+        tmp_res.append(count_others)
+        tmp_bag = tuple(tmp_res)
+        if target_db.get(tmp_bag):
+            target_db[tmp_bag] += 1
+        else:
+            target_db.update({tmp_bag: 1})
+            if mode == "monitor":
+                self.mismatch_count += 1
+
+    # Syscalls bags are created from a sliding window of size self.window_size
+    def process_trace(self, mode):
+        window_space = self.window_size
+        while len(self.trace) > 0 and window_space > 0:
+            self.chunks_in_window.append(self.trace.pop(0)[1])
+            window_space -= 1
+        while len(self.trace) > 0:
+            self.create_bag_from_window(mode)
+            self.chunks_in_window.pop(0)
+            self.chunks_in_window.append(self.trace.pop(0)[1])
+
+    def to_json_file(self):
+        dump_dict = {}
+        dump_dict.update({"db_bags": [list(x) for x in self.db_normal]})
+        dump_dict.update({"db_freq": [self.db_normal[x] for x in self.db_normal]})
+        dump_dict.update({"names_lookup": self.names_lookup})
+        dump_dict.update({"window_size": self.window_size})
+        with open(self.id + ".json", "w") as json_file:
+            json.dump(dump_dict, json_file)
+
+    def load(self, name):
+        with open(name + ".json") as json_file:
+            data = json.load(json_file)
+        self.window_size = data["window_size"]
+        self.names_lookup = data["names_lookup"]
+        self.db_normal = {tuple(x): y for x, y in zip(data["db_bags"], data["db_freq"])}
+
+    def db_to_str(self, target):
+        db = None
+        print_str = None
+        if target == "normal":
+            db = self.db_normal
+            print_str = str("\nSyscall bags and count for %s (NORMAL BEHAVIOUR)\n" % self.id)
+        elif target == "monitor":
+            db = self.db_monitor
+            print_str = str("\nSyscall bags and count for %s (MONITORED BEHAVIOUR)\n" % self.id)
+        print_str += str([syscall_id_list[x] for x in self.names_lookup]) + "\n"
+        for bag, count in db.items():
+            print_str += str("%s , %d" % (bag, count)) + "\n"
+        return print_str
 
 
 def on_bpf_event(cpu, data, size):
-    global start, tracefile, mode_trace
+    global time_start, cli_options, cli_arg_name, bag_dbs, window_size
     event = bpf["events"].event(data)
-    if start == 0:
-        start = event.ts
-    time_s = (float(event.ts - start)) / 1000000000
-    if mode_trace:
-        epoch = int(time_s)
-        tracefile.write("%d %s %d\n" % (epoch, event.uts_name, event.call))
+    if time_start == 0:
+        time_start = event.ts
+    time_s = (float(event.ts - time_start)) / 1000000000
+    epoch = int(time_s)
     print(b"%-18.9f %-16s %-16s %-16d %-10d %-16d %-10s %s" % (
         time_s, event.uts_name, event.comm, event.real_pid, event.ns_pid, event.ns_id, syscall_id_list[event.call],
         event.path))
 
+    db_name = event.uts_name
+    if cli_options.task_id or cli_options.container_id:
+        db_name = cli_arg_name
+    if db_name not in bag_dbs:
+        new_db = BagManager(db_name, window_size)
+        bag_dbs.update({db_name: new_db})
+    bag_dbs[db_name].add_event(epoch, event.call)
+
 
 def ebpf_listen():
-    global syscall_id_list, bpf, ebpf_filename, trace_filename, tracefile, start
+    global cli_options, cli_arg_name, syscall_id_list, syscall_id_ret_list, bpf, ebpf_filename
 
     with open(ebpf_filename, 'r') as ebpf_file:
         ebpf_base_str = ebpf_file.read()
+
     bpf = BPF(text=ebpf_base_str)
-    print("These Syscalls will be tracked:\n")
-    for x in syscall_id_list:
+
+    # Passing config values to the eBPF program through already initialized maps
+
+    if cli_options.task_id or cli_options.container_id:
+        print("\nTracking item with id \"%s\"\n" % cli_arg_name)
+        if cli_options.task_id:
+            key = ctypes.c_uint32(SharedConfig.CONFIG_TASK_MODE)
+        else:
+            key = ctypes.c_uint32(SharedConfig.CONFIG_CONTAINER_MODE)
+        bpf["config_map"][key] = ctypes.c_uint32(True)
+        strct = SharedTaskname()
+        strct.name = cli_arg_name
+        key = ctypes.c_uint32(0)
+        bpf["taskname_buf"][key] = strct
+    else:
+        key = ctypes.c_uint32(SharedConfig.CONFIG_TASK_MODE)
+        bpf["config_map"][key] = ctypes.c_uint32(False)
+        key = ctypes.c_uint32(SharedConfig.CONFIG_CONTAINER_MODE)
+        bpf["config_map"][key] = ctypes.c_uint32(False)
+
+    if cli_options.mode_verbose:
+        print("%d syscalls will be tracked:\n%s" % (len(syscall_id_list), ", ".join(syscall_id_list)))
+
+    # Attaching kprobes for syscalls and events.
+    # execve, execveat and do_exit are mandatory for tracking the containers
+
+    bpf.attach_kprobe(event="do_exit", fn_name="trace_do_exit")
+    for x in syscall_id_list[1:]:
         syscall_fname = bpf.get_syscall_fnname(x)
-        print(syscall_fname)
         bpf.attach_kprobe(syscall_fname, fn_name="syscall__" + x)
+
+    # Attaching kretprobes for syscalls
+    # fork, vfork and clone are mandatory for tracking child processes
+
+    if cli_options.task_id:
+        for x in syscall_id_ret_list:
+            syscall_fname = bpf.get_syscall_fnname(x)
+            bpf.attach_kretprobe(event=syscall_fname, fn_name="trace_ret_" + x)
+
     print("\n%-18s %-16s %-16s %-16s %-10s %-16s %-10s %s" % (
         "TIME(s)", "UTS_NAME", "COMM", "REAL_PID", "NS_PID", "NS_ID", "SYSCALL", "PATH"))
-    start = 0
+
     bpf["events"].open_perf_buffer(on_bpf_event)
 
-    with open(trace_filename, 'w+') as tracefile:
-        while True:
-            try:
-                bpf.perf_buffer_poll()
-            except KeyboardInterrupt:
-                break
+    while True:
+        try:
+            bpf.perf_buffer_poll()
+        except KeyboardInterrupt:
+            break
 
 
-def tracefile_process():
-    traces = {}
-    occurrencies = {}
-    with open(trace_filename) as whole_trace:
-        line = whole_trace.readline()
-        fields = line.split()
-        while line and len(fields) == 3:
-            curr_id = fields[1]
-            curr_syscall = int(fields[2])
-            name_tmp = curr_id + '.trace'
-            if traces.get(curr_id) is None:
-                new_file = open(name_tmp, 'w+')
-                traces.update({curr_id: new_file})
-                zeroed_list = list((x, 0) for x in range(len(syscall_id_list)))
-                occurrencies.update({curr_id: zeroed_list})
-            traces.get(curr_id).writelines(line)
-            old_tuple = occurrencies.get(curr_id)[curr_syscall]
-            occurrencies.get(curr_id)[curr_syscall] = (old_tuple[0], old_tuple[1] + 1)
-            line = whole_trace.readline()
-            fields = line.split()
+def main():
+    global cli_options, cli_arg_name
 
-    for container_id, fd in traces.items():
-        fd.close()
+    # Dealing with CLI options
 
-    for container_id, bag in occurrencies.items():
-        name_tmp = container_id + '.list'
-        bag.sort(key=lambda tup: tup[1], reverse=True)
-        with open(name_tmp, 'w+') as new_file:
-            for elem in bag:
-                line = [elem[0], ' ', elem[1], ' ', syscall_id_list[elem[0]], '\n']
-                new_file.writelines(str(x) for x in line)
-    return list(traces.keys())
+    OptParser = OptionParser()
+    OptParser.add_option("-l", "--learn", action="store_true", dest="mode_learn", default=False,
+                         help="Creates databses of normal behaviour for the items the program listened to")
+    OptParser.add_option("-m", "--monitor", action="store_true", dest="mode_monitor", default=False,
+                         help="Monitor the selected process/container for anomalies using a previosly generated "
+                              "normal behaviour database")
+    OptParser.add_option("-t", "--task", action="store", type="string", dest="task_id", default=None,
+                         help="Start the program in task mode. Needs the taskname to track as argument.")
+    OptParser.add_option("-c", "--container", action="store", type="string", dest="container_id", default=None,
+                         help="Start the program in container mode. Needs the container id to track as argument.")
+    OptParser.add_option("-v", "--verbose", action="store_true", dest="mode_verbose", default=False,
+                         help="Start the program in verbose mode, printing more info")
+    (cli_options, args) = OptParser.parse_args()
 
+    if cli_options.task_id and cli_options.container_id:
+        OptParser.error("options -t and -c are mutually exclusive")
+    if cli_options.mode_learn and cli_options.mode_monitor:
+        OptParser.error("options -l and -m are mutually exclusive")
+    cli_arg_name = cli_options.task_id if cli_options.task_id else cli_options.container_id
 
-def main(argv):
-    global trace_filename, tracefile, mode_classify, mode_trace
-    try:
-        opts, args = getopt.getopt(argv, "tc")
-    except getopt.GetoptError:
-        print 'Invalid Arguments'
-        sys.exit(2)
-    for opt, args in opts:
-        if opt == '-t':
-            mode_trace = True
-        elif opt == '-c':
-            mode_classify = True
+    # Normal behaviour data must be loaded before starting to listen
+    if cli_options.mode_monitor:
+        bag_mngr = BagManager(cli_arg_name, window_size)
+        bag_mngr.load(cli_arg_name)
+        bag_dbs.update({cli_arg_name: bag_mngr})
+        if cli_options.mode_verbose:
+            print("Loaded normal behaviour dataset for %s" % cli_arg_name)
+            print(bag_mngr.db_to_str(target="normal"))
+
     ebpf_listen()
-    container_discovered = tracefile_process()
-    if len(container_discovered) == 0:
-        print("No container has been discovered")
-    else:
-        print("\n%d containers has been discovered, with id:\n" % (len(container_discovered)))
-        print(container_discovered)
-    if mode_classify:
-        for container_id in container_discovered:
-            db = bagDb(container_id)
+
+    # Process and write data to json after listening the process/container
+    if cli_options.mode_learn:
+        for name, db in bag_dbs.items():
             db.init_lookup_names()
-            db.create_db()
-            print("A System call bag for %s has been classified:\n" % container_id)
-            print(db.bag_db)
+            db.process_trace(mode="learn")
+            db.to_json_file()
+            if cli_options.mode_verbose:
+                print(db.db_to_str(target="normal"))
+
+    # Process and print data after monitoring the process/container
+    if cli_options.mode_monitor:
+        db = bag_dbs[cli_arg_name]
+        db.process_trace(mode="monitor")
+        print("\nMISMATCH %d\n" % db.mismatch_count)
+        print(db.db_to_str(target="normal"))
+        print(db.db_to_str(target="monitor"))
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()
