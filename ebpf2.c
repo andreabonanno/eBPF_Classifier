@@ -3,9 +3,11 @@
 #include <linux/pid_namespace.h>
 #include <linux/utsname.h>
 
+// Indexes of the config map
 #define CONFIG_TASK_MODE 0
 #define CONFIG_CONTAINER_MODE 1
 
+// Must match the python program syscall id lis
 enum syscall_id {
     SYS_EXIT,
     SYS_EXECVE,
@@ -64,6 +66,7 @@ enum syscall_id {
     SYS_SETFSGID,
 };
 
+//ebpf event data
 typedef struct {
     u32 real_pid;
     u32 ns_pid;
@@ -81,7 +84,9 @@ typedef struct {
 } taskname_buf_t;
 
 BPF_HASH(config_map, u32, u32);
+//Holds pid and ns_id to track
 BPF_HASH(pids_map, u32, u32);
+//Used to get arguments at runtime from the python proram
 BPF_HASH(taskname_buf, u32, taskname_buf_t);
 BPF_PERF_OUTPUT(events);
 
@@ -110,7 +115,6 @@ static  void add_pid_fork(u32 pid)
 {
     pids_map.update(&pid, &pid);
 }
-
 
 static void remove_pid()
 {
@@ -189,6 +193,7 @@ static int is_task()
     return *pid;
 }
 
+//Usage of strcmp is not permitted in eBpf programs
 static int comp_with_taskname_buf(const char *str_ptr)
 {
     char str_a[TASK_COMM_LEN];
@@ -207,6 +212,7 @@ static int comp_with_taskname_buf(const char *str_ptr)
     return 1;
 }
 
+//Current process matches the taskname provided
 static int is_my_task()
 {
     char name_ref[TASK_COMM_LEN];
@@ -214,6 +220,7 @@ static int is_my_task()
     return comp_with_taskname_buf(name_ref);
 }
 
+//Current proces matches the container id provided
 static int is_my_container()
 {
     struct task_struct *task;
@@ -221,6 +228,7 @@ static int is_my_container()
     return comp_with_taskname_buf(get_task_uts_name(task));
 }
 
+//Fills the event data struct
 static int init_data(data_t *data){
     struct task_struct *task;
     task = (struct task_struct *) bpf_get_current_task();
@@ -323,6 +331,7 @@ static int trace_generic(struct pt_regs *ctx, u32 id) {
     return 0;
 }
 
+//Needs further testing
 static int trace_ret_fork_generic(struct pt_regs *ctx) {
 
     if(container_mode())
