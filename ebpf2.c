@@ -128,11 +128,10 @@ static u32 add_pid_ns_if_needed() {
         return pid_ns;
     // If pid equals 1 - start tracing the container
     if (get_task_ns_pid(task) == 1) {
-        // A new container/pod was started - add pid namespace to map
+        // A new container was started, add pid namespace to map
         pids_map.update(&pid_ns, &pid_ns);
         return pid_ns;
     }
-    // Not a container/pod
     return 0;
 }
 

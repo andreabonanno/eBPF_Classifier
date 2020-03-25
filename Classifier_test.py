@@ -5,6 +5,7 @@ from optparse import OptionParser
 import ctypes
 import json
 
+# This list must match the one in the eBpf program
 syscall_id_list = ["exit", "execve", "execveat", "mmap", "mprotect", "clone", "fork", "vfork", "newstat",
                    "newfstat", "newlstat", "mknod", "mknodat", "dup", "dup2", "dup3",
                    "memfd_create", "socket", "close", "ioctl", "access", "faccessat", "kill", "listen",
@@ -14,6 +15,7 @@ syscall_id_list = ["exit", "execve", "execveat", "mmap", "mprotect", "clone", "f
                    "mount", "umount", "unlink", "unlinkat", "setuid", "setgid", "setreuid", "setregid",
                    "setresuid", "setresgid", "setfsuid", "setfsgid"]
 
+# Kretprobes neeeded to track child processes
 syscall_id_ret_list = ["clone", "fork", "vfork"]
 
 cli_options = {}
@@ -25,11 +27,13 @@ bag_dbs = {}
 window_size = 10
 
 
+# Indexes of the eBpf map used to pass config to the eBpf program
 class SharedConfig(object):
     CONFIG_TASK_MODE = 0
     CONFIG_CONTAINER_MODE = 1
 
 
+# This struct must match the one defined in the eBpf file
 class SharedTaskname(ctypes.Structure):
     _fields_ = [("name", ctypes.c_char * 16)]
 
@@ -47,6 +51,7 @@ class BagManager:
         self.freq = [0] * len(syscall_id_list)
         self.names_lookup = []
 
+    # Events are grouped per epoch
     def add_event(self, epoch, call):
         if epoch not in [x[0] for x in self.trace]:
             new_epoch = [0] * len(syscall_id_list)
@@ -54,6 +59,8 @@ class BagManager:
         self.trace[-1][1][call] += 1
         self.freq[call] += 1
 
+    # Keeps correspondece for the global syscall ids and the BagManager specific ids
+    # Sysycalls with low occurence are marked as "other"
     def init_lookup_names(self):
         syscall_dinstinct = sum(x > 0 for x in self.freq)
         for idx, x in enumerate(self.freq):
@@ -66,6 +73,7 @@ class BagManager:
         except ValueError:
             return None
 
+    # Creates a syscall bag from the current sliding window
     def create_bag_from_window(self, mode):
         target_db = None
         if mode == "learn":
@@ -93,6 +101,7 @@ class BagManager:
             if mode == "monitor":
                 self.mismatch_count += 1
 
+    # Syscalls bags are created from a sliding window of size self.window_size
     def process_trace(self, mode):
         window_space = self.window_size
         while len(self.trace) > 0 and window_space > 0:
@@ -237,6 +246,7 @@ def main():
         OptParser.error("options -l and -m are mutually exclusive")
     cli_arg_name = cli_options.task_id if cli_options.task_id else cli_options.container_id
 
+    # Normal behaviour data must be loaded before starting to listen
     if cli_options.mode_monitor:
         bag_mngr = BagManager(cli_arg_name, window_size)
         bag_mngr.load(cli_arg_name)
@@ -246,6 +256,8 @@ def main():
             print(bag_mngr.db_to_str(target="normal"))
 
     ebpf_listen()
+
+    # Process and write data to json after listening the process/container
     if cli_options.mode_learn:
         for name, db in bag_dbs.items():
             db.init_lookup_names()
@@ -254,6 +266,7 @@ def main():
             if cli_options.mode_verbose:
                 print(db.db_to_str(target="normal"))
 
+    # Process and print data after monitoring the process/container
     if cli_options.mode_monitor:
         db = bag_dbs[cli_arg_name]
         db.process_trace(mode="monitor")
