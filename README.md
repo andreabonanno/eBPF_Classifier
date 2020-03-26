@@ -41,5 +41,4 @@ Then start the container:
 Stop monitoring with SIGINT Ctrl-C or when anomaly is found
 
 TODO:
-- Stabilire le metriche in base alle quali i mismatch nei dizionari di comportamento "normale" e comportamento monitorato sono considerati un'anomalia, secondo quanto visto in https://ieeexplore.ieee.org/document/7414047
-- Implementare la modalita' di segnalazione anomalie in real-time
+- Migliorare i parametri in base ai quali i mismatch nei dizionari di comportamento "normale" e comportamento monitorato sono considerati un'anomalia, secondo quanto visto in https://ieeexplore.ieee.org/document/7414047
