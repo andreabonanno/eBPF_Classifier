@@ -4,6 +4,7 @@ from bcc import BPF
 from optparse import OptionParser
 import ctypes
 import json
+import math
 
 # This list must match the one in the eBpf program
 syscall_id_list = ["exit", "execve", "execveat", "mmap", "mprotect", "clone", "fork", "vfork", "newstat",
@@ -25,6 +26,7 @@ time_start = 0
 ebpf_filename = 'ebpf2.c'
 bag_dbs = {}
 window_size = 10
+epoch_size = 1000
 
 
 # Indexes of the eBpf map used to pass config to the eBpf program
@@ -40,23 +42,25 @@ class SharedTaskname(ctypes.Structure):
 
 class BagManager:
 
-    def __init__(self, name, wsize):
+    def __init__(self, name, wsize, esize):
         self.id = name
-        self.db_normal = {}
-        self.db_monitor = {}
-        self.mismatch_count = 0
+        self.db_curr = {}
+        self.db_old = {}
+        self.similarity = 0
+        self.similarity_list = []
+        self.sim_tresh = 0.99
         self.window_size = wsize
+        self.epoch_size = esize
         self.chunks_in_window = []
         self.trace = []
         self.freq = [0] * len(syscall_id_list)
         self.names_lookup = []
+        self.mismatch_count = 0
+        self.mismatch_tresh = epoch_size / 10
+        self.monitor_events = 0
 
-    # Events are grouped per epoch
-    def add_event(self, epoch, call):
-        if epoch not in [x[0] for x in self.trace]:
-            new_epoch = [0] * len(syscall_id_list)
-            self.trace.append([epoch, new_epoch])
-        self.trace[-1][1][call] += 1
+    def add_event(self, call):
+        self.trace.append(call)
         self.freq[call] += 1
 
     # Keeps correspondece for the global syscall ids and the BagManager specific ids
@@ -74,73 +78,115 @@ class BagManager:
             return None
 
     # Creates a syscall bag from the current sliding window
-    def create_bag_from_window(self, mode):
-        target_db = None
-        if mode == "learn":
-            target_db = self.db_normal
-        elif mode == "monitor":
-            target_db = self.db_monitor
-
-        tmp_chunk = [0] * len(syscall_id_list)
-        tmp_res = [0] * len(self.names_lookup)
-        for chunk in self.chunks_in_window:
-            tmp_chunk = [x + y for x, y in zip(tmp_chunk, chunk)]
-        count_others = 0
-        for idx, x in enumerate(tmp_chunk):
-            res_lookup = self.lookup_name(idx)
-            if res_lookup is None:
-                count_others += x
+    def create_bag_from_window(self):
+        tmp_bag = [0] * len(self.names_lookup)
+        other_count = 0
+        for x in self.chunks_in_window:
+            index = self.lookup_name(x)
+            if index is None:
+                other_count += 1
             else:
-                tmp_res[res_lookup] += x
-        tmp_res.append(count_others)
-        tmp_bag = tuple(tmp_res)
-        if target_db.get(tmp_bag):
-            target_db[tmp_bag] += 1
+                tmp_bag[index] += 1
+        tmp_bag.append(other_count)
+        return tuple(tmp_bag)
+
+    def add_bag_to_db(self, bag):
+        if bag in self.db_curr:
+            old_t = self.db_curr[bag]
+            self.db_curr[bag] = (old_t[0] + 1, old_t[1] + 1)
         else:
-            target_db.update({tmp_bag: 1})
-            if mode == "monitor":
-                self.mismatch_count += 1
+            self.db_curr.update({bag: (1, 1)})
+
+    def rotate_db(self):
+        self.db_old = dict(self.db_curr)
+        for k, v in self.db_curr.items():
+            t_count = v[0]
+            self.db_curr[k] = (t_count, 0)
 
     # Syscalls bags are created from a sliding window of size self.window_size
-    def process_trace(self, mode):
+    def process_trace(self):
         window_space = self.window_size
+        count = 0
         while len(self.trace) > 0 and window_space > 0:
-            self.chunks_in_window.append(self.trace.pop(0)[1])
+            self.chunks_in_window.append(self.trace.pop(0))
             window_space -= 1
+            count += 1
+
         while len(self.trace) > 0:
-            self.create_bag_from_window(mode)
+            bag = self.create_bag_from_window()
+            self.add_bag_to_db(bag)
+            count += 1
+            if count == self.epoch_size:
+                self.similarity = self.evaluate()
+                self.similarity_list.append(self.similarity)
+                if self.similarity > self.sim_tresh:
+                    return True
+                self.rotate_db()
+                count = 0
             self.chunks_in_window.pop(0)
-            self.chunks_in_window.append(self.trace.pop(0)[1])
+            self.chunks_in_window.append(self.trace.pop(0))
+        return False
+
+    def monitor_trace(self):
+        if len(self.trace) < self.epoch_size:
+            return False, self.mismatch_count
+        print(len(self.trace))
+        window_space = self.window_size
+        count = 0
+        while len(self.trace) > 0 and window_space > 0:
+            self.chunks_in_window.append(self.trace.pop(0))
+            window_space -= 1
+            count += 1
+
+        while len(self.trace) > 0 and count < self.epoch_size:
+            bag = self.create_bag_from_window()
+            if bag not in self.db_curr:
+                self.mismatch_count += 1
+                if self.mismatch_count >= self.mismatch_tresh:
+                    return True
+            count += 1
+            self.chunks_in_window.pop(0)
+            self.chunks_in_window.append(self.trace.pop(0))
+        self.mismatch_count = 0
+        return False
+
+    def evaluate(self):
+        freq_c = []
+        freq_t = []
+        for k, v in self.db_curr.items():
+            freq_c.append(v[1] + 1)
+            if k in self.db_old:
+                freq_t.append(self.db_old[k][1] + 1)
+            else:
+                freq_t.append(1)
+        return cosine_metric(freq_c, freq_t)
 
     def to_json_file(self):
         dump_dict = {}
-        dump_dict.update({"db_bags": [list(x) for x in self.db_normal]})
-        dump_dict.update({"db_freq": [self.db_normal[x] for x in self.db_normal]})
+        dump_dict.update({"db_bags": [list(x) for x in self.db_curr]})
+        dump_dict.update({"db_freq": [self.db_curr[x][0] for x in self.db_curr]})
         dump_dict.update({"names_lookup": self.names_lookup})
         dump_dict.update({"window_size": self.window_size})
         with open(self.id + ".json", "w") as json_file:
-            json.dump(dump_dict, json_file)
+            json_file.write(json.dumps(dump_dict, indent=4))
 
     def load(self, name):
         with open(name + ".json") as json_file:
             data = json.load(json_file)
         self.window_size = data["window_size"]
         self.names_lookup = data["names_lookup"]
-        self.db_normal = {tuple(x): y for x, y in zip(data["db_bags"], data["db_freq"])}
+        self.db_curr = {tuple(x): y for x, y in zip(data["db_bags"], data["db_freq"])}
 
-    def db_to_str(self, target):
-        db = None
-        print_str = None
-        if target == "normal":
-            db = self.db_normal
-            print_str = str("\nSyscall bags and count for %s (NORMAL BEHAVIOUR)\n" % self.id)
-        elif target == "monitor":
-            db = self.db_monitor
-            print_str = str("\nSyscall bags and count for %s (MONITORED BEHAVIOUR)\n" % self.id)
-        print_str += str([syscall_id_list[x] for x in self.names_lookup]) + "\n"
-        for bag, count in db.items():
-            print_str += str("%s , %d" % (bag, count)) + "\n"
-        return print_str
+
+def cosine_metric(v1, v2):
+    sumxx, sumxy, sumyy = 0, 0, 0
+    for i in range(len(v1)):
+        x = v1[i]
+        y = v2[i]
+        sumxx += x * x
+        sumyy += y * y
+        sumxy += x * y
+    return sumxy / math.sqrt(sumxx * sumyy)
 
 
 def on_bpf_event(cpu, data, size):
@@ -158,9 +204,9 @@ def on_bpf_event(cpu, data, size):
     if cli_options.task_id or cli_options.container_id:
         db_name = cli_arg_name
     if db_name not in bag_dbs:
-        new_db = BagManager(db_name, window_size)
+        new_db = BagManager(db_name, window_size, epoch_size)
         bag_dbs.update({db_name: new_db})
-    bag_dbs[db_name].add_event(epoch, event.call)
+    bag_dbs[db_name].add_event(event.call)
 
 
 def ebpf_listen():
@@ -217,6 +263,10 @@ def ebpf_listen():
     while True:
         try:
             bpf.perf_buffer_poll()
+            if cli_options.mode_monitor:
+                if bag_dbs[cli_arg_name].monitor_trace():
+                    print("ANOMALY FOUND FOR %s" % cli_arg_name)
+                    break
         except KeyboardInterrupt:
             break
 
@@ -248,12 +298,12 @@ def main():
 
     # Normal behaviour data must be loaded before starting to listen
     if cli_options.mode_monitor:
-        bag_mngr = BagManager(cli_arg_name, window_size)
+        bag_mngr = BagManager(cli_arg_name, window_size, epoch_size)
         bag_mngr.load(cli_arg_name)
         bag_dbs.update({cli_arg_name: bag_mngr})
+        print(len(bag_dbs[cli_arg_name].db_curr))
         if cli_options.mode_verbose:
             print("Loaded normal behaviour dataset for %s" % cli_arg_name)
-            print(bag_mngr.db_to_str(target="normal"))
 
     ebpf_listen()
 
@@ -261,18 +311,15 @@ def main():
     if cli_options.mode_learn:
         for name, db in bag_dbs.items():
             db.init_lookup_names()
-            db.process_trace(mode="learn")
-            db.to_json_file()
+            if db.process_trace() > 0:
+                print("Normal behaviour data has been gathered for %s after %d epochs (%d syscalls)" % (
+                    cli_arg_name, len(db.similarity_list), len(db.similarity_list) * epoch_size))
+            else:
+                print("More data needs to be gathered to learn the normal behaviour of %s " % cli_arg_name)
             if cli_options.mode_verbose:
-                print(db.db_to_str(target="normal"))
-
-    # Process and print data after monitoring the process/container
-    if cli_options.mode_monitor:
-        db = bag_dbs[cli_arg_name]
-        db.process_trace(mode="monitor")
-        print("\nMISMATCH %d\n" % db.mismatch_count)
-        print(db.db_to_str(target="normal"))
-        print(db.db_to_str(target="monitor"))
+                print("Cosine similarity progression for %s:" % cli_arg_name)
+                print(db.similarity_list)
+            db.to_json_file()
 
 
 if __name__ == "__main__":
