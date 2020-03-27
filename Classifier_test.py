@@ -5,6 +5,7 @@ from optparse import OptionParser
 import ctypes
 import json
 import math
+import os.path as osp
 
 # This list must match the one in the eBpf program
 syscall_id_list = ["exit", "execve", "execveat", "mmap", "mprotect", "clone", "fork", "vfork", "newstat",
@@ -296,10 +297,14 @@ def main():
     # Normal behaviour data must be loaded before starting to listen
     if cli_options.mode_monitor:
         bag_mngr = BagManager(cli_arg_name, window_size, epoch_size)
+        if not osp.isfile(cli_arg_name + ".json"):
+            print("Normal Behaviour file for %s not found" % cli_arg_name)
+            exit(True)
         bag_mngr.load(cli_arg_name)
         bag_dbs.update({cli_arg_name: bag_mngr})
         if cli_options.mode_verbose:
             print("Loaded normal behaviour dataset for %s" % cli_arg_name)
+
     ebpf_listen()
 
     # Process and write data to json after listening the process/container
