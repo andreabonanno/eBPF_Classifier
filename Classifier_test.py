@@ -51,6 +51,7 @@ class BagManager:
         self.sim_tresh = 0.99
         self.window_size = wsize
         self.epoch_size = esize
+        self.epoch_offst = 0
         self.chunks_in_window = []
         self.trace = []
         self.freq = [0] * len(syscall_id_list)
@@ -128,26 +129,22 @@ class BagManager:
         return False
 
     def monitor_trace(self):
-        if len(self.trace) < self.epoch_size:
-            return False, self.mismatch_count
-        print(len(self.trace))
-        window_space = self.window_size
-        count = 0
-        while len(self.trace) > 0 and window_space > 0:
+        while len(self.trace) > 0 and len(self.chunks_in_window) < self.window_size:
             self.chunks_in_window.append(self.trace.pop(0))
-            window_space -= 1
-            count += 1
+            self.epoch_offst += 1
 
-        while len(self.trace) > 0 and count < self.epoch_size:
+        while len(self.trace) > 0 and self.epoch_offst < self.epoch_size:
             bag = self.create_bag_from_window()
             if bag not in self.db_curr:
                 self.mismatch_count += 1
                 if self.mismatch_count >= self.mismatch_tresh:
                     return True
-            count += 1
+            self.epoch_offst += 1
             self.chunks_in_window.pop(0)
             self.chunks_in_window.append(self.trace.pop(0))
-        self.mismatch_count = 0
+        if self.epoch_offst == self.epoch_offst:
+            self.mismatch_count = 0
+            self.epoch_offst = 0
         return False
 
     def evaluate(self):
@@ -265,7 +262,7 @@ def ebpf_listen():
             bpf.perf_buffer_poll()
             if cli_options.mode_monitor:
                 if bag_dbs[cli_arg_name].monitor_trace():
-                    print("ANOMALY FOUND FOR %s" % cli_arg_name)
+                    print("ANOMALY FOUND FOR %s\nMISMATCH COUNT %d\n" % (cli_arg_name, bag_dbs[cli_arg_name].mismatch_count))
                     break
         except KeyboardInterrupt:
             break
@@ -301,10 +298,8 @@ def main():
         bag_mngr = BagManager(cli_arg_name, window_size, epoch_size)
         bag_mngr.load(cli_arg_name)
         bag_dbs.update({cli_arg_name: bag_mngr})
-        print(len(bag_dbs[cli_arg_name].db_curr))
         if cli_options.mode_verbose:
             print("Loaded normal behaviour dataset for %s" % cli_arg_name)
-
     ebpf_listen()
 
     # Process and write data to json after listening the process/container
