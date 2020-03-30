@@ -202,7 +202,7 @@ static int comp_with_taskname_buf(const char *str_ptr)
     u32 key = 0;
     taskname_buf_t *elem = (taskname_buf_t *) taskname_buf.lookup(&key);
     bpf_probe_read_str(str_b,TASK_COMM_LEN,elem->name);
-    #pragma unroll
+    
     for(int i = 0; i< TASK_COMM_LEN; i++){
         if(str_a[i] != str_b[i])
             return 0;
