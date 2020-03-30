@@ -45,18 +45,27 @@ class BagManager:
 
     def __init__(self, name, wsize, esize):
         self.id = name
+        # Current epoch snaposhot of the database of normal behaviour bags
         self.db_curr = {}
+        # Old epoch snapshot of the database of normal behaviour bags
         self.db_old = {}
+        # Cosine simlarity of current vs old database snapshots
         self.similarity = 0
+        # History of similarity values updates
         self.similarity_list = []
+        # Treshold used to determine if the learning process has come to an end
         self.sim_tresh = 0.99
+        # Size of the sliding window used by the learning algorithm
         self.window_size = wsize
         self.epoch_size = esize
         self.epoch_offst = 0
+        # Events currently inside the sliding window
         self.chunks_in_window = []
         self.trace = []
+        # Frequency of the syscalls, used to mark the less frequent ones as "others"
         self.freq = [0] * len(syscall_id_list)
         self.names_lookup = []
+        # Mismatch with the normal behaviour database are used to signal an anomaly during monitoring
         self.mismatch_count = 0
         self.mismatch_tresh = epoch_size / 10
         self.monitor_events = 0
@@ -105,7 +114,7 @@ class BagManager:
             t_count = v[0]
             self.db_curr[k] = (t_count, 0)
 
-    # Syscalls bags are created from a sliding window of size self.window_size
+    # Used during learning. Syscalls bags are created from a sliding window of size self.window_size
     def process_trace(self):
         window_space = self.window_size
         count = 0
@@ -129,6 +138,7 @@ class BagManager:
             self.chunks_in_window.append(self.trace.pop(0))
         return False
 
+    # Used during monitoring. Syscall bags are looked up against the normal behaviour database to detect anomalies.
     def monitor_trace(self):
         while len(self.trace) > 0 and len(self.chunks_in_window) < self.window_size:
             self.chunks_in_window.append(self.trace.pop(0))
@@ -148,6 +158,7 @@ class BagManager:
             self.epoch_offst = 0
         return False
 
+    # Parsing of frequency shifts of current and old snapshots and computing of the cosine metric
     def evaluate(self):
         freq_c = []
         freq_t = []
@@ -187,6 +198,7 @@ def cosine_metric(v1, v2):
     return sumxy / math.sqrt(sumxx * sumyy)
 
 
+# Ebpf callback
 def on_bpf_event(cpu, data, size):
     global time_start, cli_options, cli_arg_name, bag_dbs, window_size
     event = bpf["events"].event(data)
@@ -206,6 +218,7 @@ def on_bpf_event(cpu, data, size):
     bag_dbs[db_name].add_event(event.call)
 
 
+# Setting up the bpf object using bcc
 def ebpf_listen():
     global cli_options, cli_arg_name, syscall_id_list, syscall_id_ret_list, bpf, ebpf_filename
 
@@ -262,7 +275,8 @@ def ebpf_listen():
             bpf.perf_buffer_poll()
             if cli_options.mode_monitor:
                 if bag_dbs[cli_arg_name].monitor_trace():
-                    print("ANOMALY FOUND FOR %s\nMISMATCH COUNT %d\n" % (cli_arg_name, bag_dbs[cli_arg_name].mismatch_count))
+                    print("ANOMALY FOUND FOR %s\nMISMATCH COUNT %d\n" % (
+                        cli_arg_name, bag_dbs[cli_arg_name].mismatch_count))
                     break
         except KeyboardInterrupt:
             break
