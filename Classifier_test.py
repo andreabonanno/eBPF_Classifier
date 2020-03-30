@@ -193,7 +193,6 @@ def on_bpf_event(cpu, data, size):
     if time_start == 0:
         time_start = event.ts
     time_s = (float(event.ts - time_start)) / 1000000000
-    epoch = int(time_s)
     print(b"%-18.9f %-16s %-16s %-16d %-10d %-16d %-10s %s" % (
         time_s, event.uts_name, event.comm, event.real_pid, event.ns_pid, event.ns_id, syscall_id_list[event.call],
         event.path))

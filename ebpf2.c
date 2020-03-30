@@ -338,7 +338,7 @@ static int trace_ret_fork_generic(struct pt_regs *ctx) {
         return 0;
 
     u32 retval = PT_REGS_RC(ctx);
-    if(is_task() && retval > 0)
+    if(is_my_task() && retval > 0)
         add_pid_fork(retval);
     return 0;
 }
