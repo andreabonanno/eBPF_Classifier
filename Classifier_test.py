@@ -2,6 +2,7 @@
 
 from bcc import BPF
 from optparse import OptionParser
+import sys
 import ctypes
 import json
 import math
@@ -24,6 +25,7 @@ cli_options = {}
 cli_arg_name = None
 bpf = None
 time_start = 0
+event_count = 0
 ebpf_filename = 'ebpf2.c'
 bag_dbs = {}
 window_size = 10
@@ -69,6 +71,7 @@ class BagManager:
         self.mismatch_count = 0
         self.mismatch_tresh = epoch_size / 10
         self.monitor_events = 0
+        self.anomalies_count = 0
 
     def add_event(self, call):
         self.trace.append(call)
@@ -149,6 +152,7 @@ class BagManager:
             if bag not in self.db_curr:
                 self.mismatch_count += 1
                 if self.mismatch_count >= self.mismatch_tresh:
+                    self.anomalies_count += 1
                     return True
             self.epoch_offst += 1
             self.chunks_in_window.pop(0)
@@ -198,14 +202,14 @@ def cosine_metric(v1, v2):
     return sumxy / math.sqrt(sumxx * sumyy)
 
 
-# Ebpf callback
-def on_bpf_event(cpu, data, size):
+# Ebpf callback for listen mode
+def on_bpf_event_learn(cpu, data, size):
     global time_start, cli_options, cli_arg_name, bag_dbs, window_size
     event = bpf["events"].event(data)
     if time_start == 0:
         time_start = event.ts
     time_s = (float(event.ts - time_start)) / 1000000000
-    print(b"%-18.9f %-16s %-16s %-16d %-10d %-16d %-10s %s" % (
+    print("%-18.9f %-16s %-16s %-16d %-10d %-16d %-10s %s" % (
         time_s, event.uts_name, event.comm, event.real_pid, event.ns_pid, event.ns_id, syscall_id_list[event.call],
         event.path))
 
@@ -216,6 +220,22 @@ def on_bpf_event(cpu, data, size):
         new_db = BagManager(db_name, window_size, epoch_size)
         bag_dbs.update({db_name: new_db})
     bag_dbs[db_name].add_event(event.call)
+
+
+# Ebpf callback for monitor mode
+def on_bpf_event_monitor(cpu, data, size):
+    global time_start, cli_options, cli_arg_name, bag_dbs, event_count
+    event = bpf["events"].event(data)
+    event_count += 1
+    if time_start == 0:
+        time_start = event.ts
+    time_s = (float(event.ts - time_start)) / 1000000000
+
+    bag_dbs[cli_arg_name].add_event(event.call)
+    bag_dbs[cli_arg_name].monitor_trace()
+    print_str = "\r%-18.9f %-16s %-16s %-16s" % (time_s, cli_arg_name, event_count, bag_dbs[cli_arg_name].anomalies_count)
+    sys.stdout.write(print_str)
+    sys.stdout.flush()
 
 
 # Setting up the bpf object using bcc
@@ -265,19 +285,17 @@ def ebpf_listen():
             syscall_fname = bpf.get_syscall_fnname(x)
             bpf.attach_kretprobe(event=syscall_fname, fn_name="trace_ret_" + x)
 
-    print("\n%-18s %-16s %-16s %-16s %-10s %-16s %-10s %s" % (
-        "TIME(s)", "UTS_NAME", "COMM", "REAL_PID", "NS_PID", "NS_ID", "SYSCALL", "PATH"))
-
-    bpf["events"].open_perf_buffer(on_bpf_event)
+    if cli_options.mode_learn:
+        bpf["events"].open_perf_buffer(on_bpf_event_learn)
+        print("\n%-18s %-16s %-16s %-16s %-10s %-16s %-10s %s" % (
+            "TIME(s)", "UTS_NAME", "COMM", "REAL_PID", "NS_PID", "NS_ID", "SYSCALL", "PATH"))
+    else:
+        bpf["events"].open_perf_buffer(on_bpf_event_monitor)
+        print("\n%-18s %-16s %-16s %-16s" % ("TIME(s)", "TARGET_ID", "EVENTS_COUNT", "ANOMALIES_COUNT"))
 
     while True:
         try:
             bpf.perf_buffer_poll()
-            if cli_options.mode_monitor:
-                if bag_dbs[cli_arg_name].monitor_trace():
-                    print("ANOMALY FOUND FOR %s\nMISMATCH COUNT %d\n" % (
-                        cli_arg_name, bag_dbs[cli_arg_name].mismatch_count))
-                    break
         except KeyboardInterrupt:
             break
 
@@ -306,6 +324,8 @@ def main():
     if cli_options.mode_learn and cli_options.mode_monitor:
         OptParser.error("options -l and -m are mutually exclusive")
     cli_arg_name = cli_options.task_id if cli_options.task_id else cli_options.container_id
+    if cli_options.mode_monitor and not cli_arg_name:
+        OptParser.error("option -m must have a valid argument")
 
     # Normal behaviour data must be loaded before starting to listen
     if cli_options.mode_monitor:
