@@ -24,8 +24,10 @@ syscall_id_ret_list = ["clone", "fork", "vfork"]
 cli_options = {}
 cli_arg_name = None
 bpf = None
+ring_buf_size = 512
 time_start = 0
 event_count = 0
+lost_count = 0
 ebpf_filename = 'ebpf2.c'
 bag_dbs = {}
 window_size = 10
@@ -153,11 +155,12 @@ class BagManager:
                 self.mismatch_count += 1
                 if self.mismatch_count >= self.mismatch_tresh:
                     self.anomalies_count += 1
+                    self.mismatch_count = 0
                     return True
             self.epoch_offst += 1
             self.chunks_in_window.pop(0)
             self.chunks_in_window.append(self.trace.pop(0))
-        if self.epoch_offst == self.epoch_offst:
+        if self.epoch_offst == self.epoch_size:
             self.mismatch_count = 0
             self.epoch_offst = 0
         return False
@@ -224,7 +227,7 @@ def on_bpf_event_learn(cpu, data, size):
 
 # Ebpf callback for monitor mode
 def on_bpf_event_monitor(cpu, data, size):
-    global time_start, cli_options, cli_arg_name, bag_dbs, event_count
+    global time_start, cli_options, cli_arg_name, bag_dbs, event_count, lost_count
     event = bpf["events"].event(data)
     event_count += 1
     if time_start == 0:
@@ -233,14 +236,19 @@ def on_bpf_event_monitor(cpu, data, size):
 
     bag_dbs[cli_arg_name].add_event(event.call)
     bag_dbs[cli_arg_name].monitor_trace()
-    print_str = "\r%-18.9f %-16s %-16s %-16s" % (time_s, cli_arg_name, event_count, bag_dbs[cli_arg_name].anomalies_count)
+    print_str = "\r%-18.9f %-16s %-16s %-16s %-16s" % (time_s, cli_arg_name, event_count, bag_dbs[cli_arg_name].anomalies_count, lost_count)
     sys.stdout.write(print_str)
     sys.stdout.flush()
 
 
+def on_bpf_event_lost(lost_cnt):
+    global lost_count
+    lost_count += lost_cnt
+
+
 # Setting up the bpf object using bcc
 def ebpf_listen():
-    global cli_options, cli_arg_name, syscall_id_list, syscall_id_ret_list, bpf, ebpf_filename
+    global cli_options, cli_arg_name, syscall_id_list, syscall_id_ret_list, bpf, ebpf_filename, ring_buf_size
 
     with open(ebpf_filename, 'r') as ebpf_file:
         ebpf_base_str = ebpf_file.read()
@@ -286,12 +294,12 @@ def ebpf_listen():
             bpf.attach_kretprobe(event=syscall_fname, fn_name="trace_ret_" + x)
 
     if cli_options.mode_learn:
-        bpf["events"].open_perf_buffer(on_bpf_event_learn)
+        bpf["events"].open_perf_buffer(on_bpf_event_learn, page_cnt=ring_buf_size, lost_cb=on_bpf_event_lost)
         print("\n%-18s %-16s %-16s %-16s %-10s %-16s %-10s %s" % (
             "TIME(s)", "UTS_NAME", "COMM", "REAL_PID", "NS_PID", "NS_ID", "SYSCALL", "PATH"))
     else:
-        bpf["events"].open_perf_buffer(on_bpf_event_monitor)
-        print("\n%-18s %-16s %-16s %-16s" % ("TIME(s)", "TARGET_ID", "EVENTS_COUNT", "ANOMALIES_COUNT"))
+        bpf["events"].open_perf_buffer(on_bpf_event_monitor, page_cnt=ring_buf_size, lost_cb=on_bpf_event_lost)
+        print("\n%-18s %-16s %-16s %-16s %-16s" % ("TIME(s)", "TARGET_ID", "EVENTS_COUNT", "ANOMALIES_COUNT", "LOST_SAMPLES"))
 
     while True:
         try:
@@ -335,6 +343,8 @@ def main():
             exit(True)
         bag_mngr.load(cli_arg_name)
         bag_dbs.update({cli_arg_name: bag_mngr})
+        print("Normal Behaviour file for %s found" % cli_arg_name)
+        print("Database size: %d " % len(bag_mngr.db_curr))
         if cli_options.mode_verbose:
             print("Loaded normal behaviour dataset for %s" % cli_arg_name)
 
@@ -342,6 +352,7 @@ def main():
 
     # Process and write data to json after listening the process/container
     if cli_options.mode_learn:
+        print("Lost %d samples" % lost_count)
         for name, db in bag_dbs.items():
             db.init_lookup_names()
             if db.process_trace() > 0:
