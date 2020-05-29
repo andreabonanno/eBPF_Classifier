@@ -320,7 +320,7 @@ def main():
                          help="Monitor the selected process/container for anomalies using a previosly generated "
                               "normal behaviour database")
     OptParser.add_option("-t", "--task", action="store", type="string", dest="task_id", default=None,
-                         help="Start the program in task mode. Needs the taskname to track as argument.")
+                         help="Start the program in task mode. Needs the of the executable to track as argument.")
     OptParser.add_option("-c", "--container", action="store", type="string", dest="container_id", default=None,
                          help="Start the program in container mode. Needs the container id to track as argument.")
     OptParser.add_option("-v", "--verbose", action="store_true", dest="mode_verbose", default=False,
