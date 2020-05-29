@@ -2,6 +2,10 @@
 
 Tested on Ubuntu 19.10, Kernel 5.3.0
 
+Goal:
+Tool for learning the normal behaviour for a task or a container and store it as a json file.
+The same tool can then monitor a process or container for which the normal behaviour has been learned, and look for anomalies at run-time.
+
 Prerequisiti:
 
 - iovisor bcc library (bynary installer)
@@ -38,7 +42,4 @@ Monitor:
 <pre>sudo python Classifier_test.py -c 6b17fbeeefef -mv</pre>
 Then start the container:
 <pre>sudo docker start 6b17fbeeefef</pre>
-Stop monitoring with SIGINT Ctrl-C or when anomaly is found
-
-TODO:
-- Migliorare i parametri in base ai quali i mismatch nei dizionari di comportamento "normale" e comportamento monitorato sono considerati un'anomalia, secondo quanto visto in https://ieeexplore.ieee.org/document/7414047
+Stop monitoring with SIGINT Ctrl-C
