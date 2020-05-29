@@ -18,17 +18,17 @@ Usage: Classifier_test.py [options]
 
 Options:
   -h, --help            show this help message and exit
-  -l, --learn           Creates databses of normal behaviour for the items the
-                        program listened to
+  -l, --learn           Creates databses of normal behaviour for the entity the
+                        program listened to.
   -m, --monitor         Monitor the selected process/container for anomalies
-                        using a previosly generated normal behaviour database
+                        using a previosly generated normal behaviour database.
   -t TASK_ID, --task=TASK_ID
                         Start the program in task mode. Needs the name of the executable to
                         track as argument (filename without the path).
   -c CONTAINER_ID, --container=CONTAINER_ID
                         Start the program in container mode. Needs the
                         container id to track as argument.
-  -v, --verbose         Start the program in verbose mode, printing more info
+  -v, --verbose         Start the program in verbose mode, printing more info.
 </pre>
 
 Example:
