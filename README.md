@@ -24,7 +24,7 @@ Options:
                         using a previosly generated normal behaviour database.
   -t TASK_ID, --task=TASK_ID
                         Start the program in task mode. Needs the name of the executable to
-                        track as argument (filename without the path).
+                        track as argument.
   -c CONTAINER_ID, --container=CONTAINER_ID
                         Start the program in container mode. Needs the
                         container id to track as argument.
