@@ -3,7 +3,7 @@
 Tested on Ubuntu 19.10, Kernel 5.3.0
 
 Goal:
-Tool for learning the normal behaviour for a task or a container and store it as a json file.
+Tool for learning the normal behaviour of a task or a container and store it as a file.
 The same tool can then monitor a process or container for which the normal behaviour has been learned, and look for anomalies at run-time.
 
 Prerequisiti:
