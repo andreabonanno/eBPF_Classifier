@@ -13,20 +13,24 @@ https://github.com/iovisor/bcc/blob/master/INSTALL.md#ubuntu---binary
 
 CLI arguments:
 
-- -l, --learn           
-Creates databases of normal behaviour for the items the
+<pre>sudo python Classifier_test.py --help
+[sudo] password for andrea: 
+Usage: Classifier_test.py [options]
+
+Options:
+  -h, --help            show this help message and exit
+  -l, --learn           Creates databses of normal behaviour for the items the
                         program listened to
--   -m, --monitor         
-Monitor the selected process/container for anomalies
+  -m, --monitor         Monitor the selected process/container for anomalies
                         using a previosly generated normal behaviour database
-- -t TASK_ID, --task=TASK_ID 
-Start the program in task mode. Needs the taskname to
+  -t TASK_ID, --task=TASK_ID
+                        Start the program in task mode. Needs the taskname to
                         track as argument.
-- -c CONTAINER_ID, --container=CONTAINER_ID
-Start the program in container mode. Needs the
+  -c CONTAINER_ID, --container=CONTAINER_ID
+                        Start the program in container mode. Needs the
                         container id to track as argument.
--  -v, --verbose         
-Start the program in verbose mode, printing more info
+  -v, --verbose         Start the program in verbose mode, printing more info
+</pre>
 
 Example:
 
