@@ -2,27 +2,34 @@
 
 Tested on Ubuntu 19.10, Kernel 5.3.0
 
-Prerequisiti:
+Goal:
+Tool for learning the normal behaviour of a task or a container and store it as a file.
+The same tool can then monitor a process or container for which the normal behaviour has been learned, and look for anomalies at run-time.
+
+Prerequisites:
 
 - iovisor bcc library (bynary installer)
 https://github.com/iovisor/bcc/blob/master/INSTALL.md#ubuntu---binary
 
 CLI arguments:
 
-- -l, --learn           
-Creates databases of normal behaviour for the items the
-                        program listened to
--   -m, --monitor         
-Monitor the selected process/container for anomalies
-                        using a previosly generated normal behaviour database
-- -t TASK_ID, --task=TASK_ID 
-Start the program in task mode. Needs the taskname to
+<pre>sudo python Classifier_test.py --help
+Usage: Classifier_test.py [options]
+
+Options:
+  -h, --help            show this help message and exit
+  -l, --learn           Creates databses of normal behaviour for the entity the
+                        program listened to.
+  -m, --monitor         Monitor the selected process/container for anomalies
+                        using a previosly generated normal behaviour database.
+  -t TASK_ID, --task=TASK_ID
+                        Start the program in task mode. Needs the name of the executable to
                         track as argument.
-- -c CONTAINER_ID, --container=CONTAINER_ID
-Start the program in container mode. Needs the
+  -c CONTAINER_ID, --container=CONTAINER_ID
+                        Start the program in container mode. Needs the
                         container id to track as argument.
--  -v, --verbose         
-Start the program in verbose mode, printing more info
+  -v, --verbose         Start the program in verbose mode, printing more info.
+</pre>
 
 Example:
 
@@ -38,7 +45,4 @@ Monitor:
 <pre>sudo python Classifier_test.py -c 6b17fbeeefef -mv</pre>
 Then start the container:
 <pre>sudo docker start 6b17fbeeefef</pre>
-Stop monitoring with SIGINT Ctrl-C or when anomaly is found
-
-TODO:
-- Migliorare i parametri in base ai quali i mismatch nei dizionari di comportamento "normale" e comportamento monitorato sono considerati un'anomalia, secondo quanto visto in https://ieeexplore.ieee.org/document/7414047
+Stop monitoring with SIGINT Ctrl-C
