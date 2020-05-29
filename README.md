@@ -6,7 +6,7 @@ Goal:
 Tool for learning the normal behaviour of a task or a container and store it as a file.
 The same tool can then monitor a process or container for which the normal behaviour has been learned, and look for anomalies at run-time.
 
-Prerequisiti:
+Prerequisites:
 
 - iovisor bcc library (bynary installer)
 https://github.com/iovisor/bcc/blob/master/INSTALL.md#ubuntu---binary
@@ -14,7 +14,6 @@ https://github.com/iovisor/bcc/blob/master/INSTALL.md#ubuntu---binary
 CLI arguments:
 
 <pre>sudo python Classifier_test.py --help
-[sudo] password for andrea: 
 Usage: Classifier_test.py [options]
 
 Options:
