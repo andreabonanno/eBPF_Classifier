@@ -24,8 +24,8 @@ Options:
   -m, --monitor         Monitor the selected process/container for anomalies
                         using a previosly generated normal behaviour database
   -t TASK_ID, --task=TASK_ID
-                        Start the program in task mode. Needs the taskname to
-                        track as argument.
+                        Start the program in task mode. Needs the name of the executable to
+                        track as argument (filename without the path).
   -c CONTAINER_ID, --container=CONTAINER_ID
                         Start the program in container mode. Needs the
                         container id to track as argument.
