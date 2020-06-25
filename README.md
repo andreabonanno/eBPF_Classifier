@@ -47,6 +47,7 @@ Then start the container:
 <pre>sudo docker start 6b17fbeeefef</pre>
 Stop monitoring with SIGINT Ctrl-C
 
+
 Test Enviroment:
 
 The tool has been tested on the official MariaDB image: https://hub.docker.com/_/mariadb
@@ -57,4 +58,4 @@ Once the MariaDB container is running and the database is online, the normal beh
 
 The anomalous behaviour has been simulated through the use of the tool Metasploit: https://www.metasploit.com/
 
-The module used for bruteforce attacks is <pre>auxiliary/scanner/mysql/mysql_login</pre>, with the common password list "rockyou.txt" https://www.kaggle.com/wjburns/common-password-list-rockyoutxt
+The module used for bruteforce attacks is <pre>auxiliary/scanner/mysql/mysql_login</pre> with the common password list "rockyou.txt" https://www.kaggle.com/wjburns/common-password-list-rockyoutxt
