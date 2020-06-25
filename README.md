@@ -48,7 +48,7 @@ Then start the container:
 Stop monitoring with SIGINT Ctrl-C
 
 
-Test Enviroment:
+#Test Enviroment:
 
 The tool has been tested on the official MariaDB image: https://hub.docker.com/_/mariadb
 
